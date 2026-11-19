@@ -1,0 +1,13 @@
+!Type:Bank
+D01/05/2026
+T-45.60
+PExample Supermarket
+MWeekly groceries
+LFood:Groceries
+^
+D01/10/2026
+T2500.00
+PExample Employer
+MSalary payment
+LSalary
+^
