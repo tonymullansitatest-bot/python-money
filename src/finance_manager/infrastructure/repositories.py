@@ -93,6 +93,13 @@ class TransactionRepository:
         self.session.flush()
         return transaction
 
+    def reference_exists(self, account_id, reference):
+        stmt = select(TransactionModel.id).where(
+            TransactionModel.account_id == account_id,
+            TransactionModel.reference == reference,
+        )
+        return self.session.scalar(stmt) is not None
+
     def duplicate_exists(self, account_id, tx_date, signed_minor, payee, memo):
         stmt = select(TransactionModel.id).where(
             TransactionModel.account_id == account_id,

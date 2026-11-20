@@ -2,9 +2,13 @@ import csv
 from datetime import date
 from decimal import Decimal
 
+from PySide6.QtCharts import (
+    QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QPieSeries, QValueAxis
+)
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QComboBox, QDateEdit, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog
 )
@@ -15,13 +19,37 @@ from finance_manager.application.services import (
     TransactionService, TransferService
 )
 from finance_manager.domain.enums import AccountType
-from finance_manager.domain.money import from_minor_units
-from finance_manager.infrastructure.models import AccountModel, CategoryModel
+from finance_manager.domain.money import from_minor_units, to_minor_units
+from finance_manager.infrastructure.csv_export import export_transactions_csv
+from finance_manager.infrastructure.models import (
+    AccountModel, CategoryModel, TransactionModel
+)
 from finance_manager.infrastructure.qif import parse_qif
+from finance_manager.infrastructure.revolut import parse_revolut_csv
+from finance_manager.presentation.themes import (
+    apply_theme, available_themes, chart_colors, saved_theme
+)
+
+_PIE_COLORS = (
+    "#3b82f6", "#f59e0b", "#10b981", "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6",
+    "#94a3b8",
+)
 
 
 class FinanceMainWindow(QMainWindow):
     """Main window for navigating and managing personal finance data."""
+
+    @staticmethod
+    def _title(text):
+        """Create a page heading that themes can target as #pageTitle."""
+        label = QLabel(text)
+        label.setObjectName("pageTitle")
+        return label
+
+    @staticmethod
+    def _named(label, name):
+        label.setObjectName(name)
+        return label
 
     def __init__(self, session_factory):
         """Initialize the navigation shell and open the dashboard."""
@@ -43,6 +71,7 @@ class FinanceMainWindow(QMainWindow):
             ("Dashboard", self.dashboard_page),
             ("Accounts", self.accounts_page),
             ("Transactions", self.transactions_page),
+            ("Transfers", self.transfers_page),
             ("Categories", self.categories_page),
             ("Reports", self.reports_page),
         ]:
@@ -51,12 +80,28 @@ class FinanceMainWindow(QMainWindow):
             nav.addWidget(button)
 
         nav.addStretch()
+        nav.addWidget(QLabel("Theme"))
+        self.theme_box = QComboBox()
+        self.theme_box.addItems(list(available_themes()))
+        self.theme_box.setCurrentText(saved_theme())
+        self.theme_box.activated.connect(self._change_theme)
+        nav.addWidget(self.theme_box)
         import_button = QPushButton("Import QIF")
         import_button.clicked.connect(self.import_qif)
         nav.addWidget(import_button)
+        revolut_button = QPushButton("Import Revolut CSV")
+        revolut_button.clicked.connect(self.import_revolut)
+        nav.addWidget(revolut_button)
 
         self.pages = {}
         self.show_page(self.dashboard_page)
+
+    def _change_theme(self, _index=None):
+        """Apply the chosen theme and redraw charts, which take their colours from it."""
+        apply_theme(self.theme_box.currentText())
+        dashboard = self.pages.get("dashboard_page")
+        if dashboard is not None:
+            dashboard.refresh()
 
     def show_page(self, builder):
         """Display a page, creating it on demand and refreshing it if supported."""
@@ -70,34 +115,182 @@ class FinanceMainWindow(QMainWindow):
             refresh()
 
     def dashboard_page(self):
-        """Build the dashboard showing balances for each account."""
+        """Build the dashboard: overview, monthly chart, spending pie and balances."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<h1>Financial Dashboard</h1>"))
-        self.dashboard_summary = QLabel()
-        self.dashboard_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.dashboard_summary)
-        layout.addWidget(QLabel("Account balances"))
-        self.dashboard_table = QTableWidget(0, 3)
-        self.dashboard_table.setHorizontalHeaderLabels(["Account", "Type", "Balance"])
-        self.dashboard_table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.dashboard_table)
+        layout.addWidget(self._title("Financial Dashboard"))
+
+        controls = QHBoxLayout()
+        period = QComboBox()
+        period.addItems(["Last 12 months", "This year", "Last year", "All time"])
+        currency = QComboBox()
+        controls.addWidget(QLabel("Period"))
+        controls.addWidget(period)
+        controls.addWidget(QLabel("Currency"))
+        controls.addWidget(currency)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        cards = QHBoxLayout()
+        card_values = {}
+        for key, caption in (
+            ("income", "Total income"), ("expenses", "Total expenses"),
+            ("net", "Net savings"),
+        ):
+            card = QFrame()
+            card.setObjectName("card")
+            card_layout = QVBoxLayout(card)
+            card_layout.addWidget(self._named(QLabel(caption), "noteLabel"))
+            value = QLabel("-")
+            value.setObjectName("cardValue")
+            value.setProperty("kind", key)
+            card_values[key] = value
+            card_layout.addWidget(value)
+            cards.addWidget(card)
+        layout.addLayout(cards)
+
+        charts = QHBoxLayout()
+        bar_view = QChartView()
+        pie_view = QChartView()
+        for view in (bar_view, pie_view):
+            view.setRenderHint(QPainter.Antialiasing)
+            view.setMinimumHeight(240)
+            charts.addWidget(view)
+        layout.addLayout(charts, 1)
+
+        layout.addWidget(self._named(QLabel("Account balances"), "sectionLabel"))
+        table = QTableWidget(0, 3)
+        table.setHorizontalHeaderLabels(["Account", "Type", "Balance"])
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        table.setMaximumHeight(150)
+        layout.addWidget(table)
+        note = self._named(QLabel(
+            "Charts and totals cover one currency at a time and exclude transfers. "
+            "Balances are shown per account currency."
+        ), "noteLabel")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        def date_range():
+            today = date.today()
+            choice = period.currentText()
+            if choice == "This year":
+                return date(today.year, 1, 1), today, "month"
+            if choice == "Last year":
+                return date(today.year - 1, 1, 1), date(today.year - 1, 12, 31), "month"
+            if choice == "All time":
+                return date(1900, 1, 1), date(9999, 12, 31), "year"
+            year, month = today.year, today.month - 11
+            if month < 1:
+                year, month = year - 1, month + 12
+            return date(year, month, 1), today, "month"
+
+        def style_chart(chart, colors, title):
+            chart.setTitle(title)
+            chart.setBackgroundBrush(QColor(colors["input_bg"]))
+            chart.setTitleBrush(QColor(colors["fg"]))
+            chart.legend().setLabelColor(QColor(colors["fg"]))
+            chart.setBackgroundRoundness(8)
+
+        def build_bar(monthly, cur, colors):
+            chart = QChart()
+            income_set = QBarSet("Income")
+            expense_set = QBarSet("Expenses")
+            income_set.setColor(QColor(colors["positive"]))
+            expense_set.setColor(QColor(colors["negative"]))
+            labels = []
+            top = 0.0
+            for label, income, expenses in monthly:
+                labels.append(label)
+                income_set.append(float(from_minor_units(income)))
+                expense_set.append(float(from_minor_units(expenses)))
+                top = max(top, float(from_minor_units(max(income, expenses))))
+            series = QBarSeries()
+            series.append(income_set)
+            series.append(expense_set)
+            chart.addSeries(series)
+            axis_x = QBarCategoryAxis()
+            axis_x.append(labels)
+            axis_y = QValueAxis()
+            axis_y.setRange(0, top * 1.1 if top else 1)
+            axis_y.setLabelFormat("%.0f")
+            for axis in (axis_x, axis_y):
+                axis.setLabelsColor(QColor(colors["fg"]))
+                axis.setGridLineColor(QColor(colors["border"]))
+            chart.addAxis(axis_x, Qt.AlignBottom)
+            chart.addAxis(axis_y, Qt.AlignLeft)
+            series.attachAxis(axis_x)
+            series.attachAxis(axis_y)
+            style_chart(chart, colors, f"Income vs expenses ({cur})")
+            return chart
+
+        def build_pie(categories, cur, colors):
+            chart = QChart()
+            spending = sorted(
+                ((c["category"], c["expenses_minor"]) for c in categories
+                 if c["currency"] == cur and c["expenses_minor"] > 0),
+                key=lambda item: item[1], reverse=True
+            )
+            if len(spending) > 8:
+                other = sum(amount for _, amount in spending[7:])
+                spending = spending[:7] + [("Other", other)]
+            total = sum(amount for _, amount in spending)
+            series = QPieSeries()
+            for index, (name, amount) in enumerate(spending):
+                pie_slice = series.append(name, float(from_minor_units(amount)))
+                pie_slice.setColor(QColor(_PIE_COLORS[index % len(_PIE_COLORS)]))
+                pie_slice.setLabel(f"{name} {amount * 100 / total:.0f}%")
+                pie_slice.setLabelColor(QColor(colors["fg"]))
+                pie_slice.setLabelVisible(len(spending) <= 8)
+            chart.addSeries(series)
+            style_chart(chart, colors, f"Spending by category ({cur})")
+            if not spending:
+                chart.setTitle(f"Spending by category ({cur}) - no spending in this period")
+            chart.legend().setAlignment(Qt.AlignRight)
+            return chart
 
         def refresh():
+            colors = chart_colors()
             with self.session_factory() as session:
                 accounts = AccountService(session).list_accounts()
-                self.dashboard_table.setRowCount(len(accounts))
-                for row, account in enumerate(accounts):
-                    balance = from_minor_units(AccountService(session).balance(account.id))
+                currencies = sorted({a.currency for a in accounts})
+                chosen = currency.currentText()
+                currency.blockSignals(True)
+                currency.clear()
+                currency.addItems(currencies)
+                if chosen in currencies:
+                    currency.setCurrentText(chosen)
+                currency.blockSignals(False)
+                cur = currency.currentText()
+
+                table.setRowCount(0)
+                active = [a for a in accounts if a.is_active]
+                table.setRowCount(len(active))
+                for row, item in enumerate(active):
+                    balance = from_minor_units(AccountService(session).balance(item.id))
                     for col, value in enumerate(
-                        [account.name, account.account_type, f"{account.currency} {balance:,.2f}"]
+                        [item.name, item.account_type, f"{item.currency} {balance:,.2f}"]
                     ):
-                        self.dashboard_table.setItem(row, col, QTableWidgetItem(str(value)))
-                self.dashboard_summary.setText(
-                    "<p>Balances are shown separately by account currency; different currencies "
-                    "are not added together. Transfers are included in account balances but "
-                    "excluded from income/expense reports.</p>"
-                )
+                        table.setItem(row, col, QTableWidgetItem(str(value)))
+
+                start, end, by = date_range()
+                service = ReportService(session)
+                totals = service.income_expense(start, end).get(cur, {})
+                monthly = service.monthly_totals(start, end, cur, by=by)
+                categories = service.category_breakdown(start, end)
+
+            totals_key = {
+                "income": "income_minor", "expenses": "expenses_minor", "net": "net_minor"
+            }
+            for key, label in card_values.items():
+                minor = totals.get(totals_key[key], 0)
+                label.setText(f"{cur} {from_minor_units(minor):,.2f}" if cur else "-")
+            bar_view.setChart(build_bar(monthly, cur, colors))
+            pie_view.setChart(build_pie(categories, cur, colors))
+
+        period.activated.connect(refresh)
+        currency.activated.connect(refresh)
         page.refresh = refresh
         return page
 
@@ -105,7 +298,7 @@ class FinanceMainWindow(QMainWindow):
         """Build the account creation form and account listing."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<h1>Accounts</h1>"))
+        layout.addWidget(self._title("Accounts"))
         form = QFormLayout()
         name = QLineEdit()
         kind = QComboBox()
@@ -117,37 +310,146 @@ class FinanceMainWindow(QMainWindow):
         form.addRow("Opening balance", opening)
         form.addRow("Currency", currency)
         layout.addLayout(form)
-        status = QLabel()
+        status = self._named(QLabel(), "statusLabel")
         layout.addWidget(status)
-        table = QTableWidget(0, 4)
-        table.setHorizontalHeaderLabels(["ID", "Name", "Type", "Currency"])
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["ID", "Name", "Type", "Currency", "Status"])
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(table)
+        row_buttons = QHBoxLayout()
+        edit_button = QPushButton("Edit selected")
+        archive_button = QPushButton("Archive selected")
+        delete_button = QPushButton("Delete selected")
+        for b in (edit_button, archive_button, delete_button):
+            b.setEnabled(False)
+            row_buttons.addWidget(b)
+        row_buttons.addStretch()
+        layout.addLayout(row_buttons)
+        editing = {"id": None}
+        archived = {}
 
         def refresh():
             with self.session_factory() as session:
                 accounts = AccountService(session).list_accounts()
+                archived.clear()
                 table.setRowCount(len(accounts))
                 for row, item in enumerate(accounts):
-                    for col, value in enumerate(
-                        [item.id, item.name, item.account_type, item.currency]
-                    ):
+                    archived[item.id] = not item.is_active
+                    for col, value in enumerate([
+                        item.id, item.name, item.account_type, item.currency,
+                        "Active" if item.is_active else "Archived"
+                    ]):
                         table.setItem(row, col, QTableWidgetItem(str(value)))
+            on_selection()
+
+        def clear_form():
+            editing["id"] = None
+            name.clear()
+            opening.setText("0.00")
+            currency.setText("EUR")
+            button.setText("Add account")
+            cancel_button.setVisible(False)
+
+        def selected_id():
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            return int(item.text()) if item else None
+
+        def on_selection():
+            account_id = selected_id()
+            has_selection = account_id is not None
+            edit_button.setEnabled(has_selection)
+            delete_button.setEnabled(has_selection)
+            archive_button.setEnabled(has_selection)
+            archive_button.setText(
+                "Restore selected" if archived.get(account_id) else "Archive selected"
+            )
+
+        def toggle_archive():
+            account_id = selected_id()
+            if account_id is None:
+                return
+            restoring = archived.get(account_id, False)
+            try:
+                with self.session_factory() as session:
+                    AccountService(session).set_active(account_id, restoring)
+                status.setText("Account restored." if restoring else "Account archived.")
+                refresh()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not update account", str(exc))
+
+        def begin_edit():
+            account_id = selected_id()
+            if account_id is None:
+                return
+            with self.session_factory() as session:
+                account = session.get(AccountModel, account_id)
+                if account is None:
+                    refresh()
+                    return
+                editing["id"] = account.id
+                name.setText(account.name)
+                kind.setCurrentText(account.account_type)
+                opening.setText(str(from_minor_units(account.opening_balance_minor)))
+                currency.setText(account.currency)
+            button.setText("Save changes")
+            cancel_button.setVisible(True)
+            status.setText("Editing account.")
+
+        def delete_selected():
+            account_id = selected_id()
+            if account_id is None:
+                return
+            answer = QMessageBox.question(
+                page, "Delete account", "Delete the selected account?"
+            )
+            if answer != QMessageBox.Yes:
+                return
+            try:
+                with self.session_factory() as session:
+                    AccountService(session).delete_account(account_id)
+                if editing["id"] == account_id:
+                    clear_form()
+                status.setText("Account deleted.")
+                refresh()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not delete account", str(exc))
 
         def add():
             try:
                 with self.session_factory() as session:
-                    AccountService(session).create_account(
-                        name.text(), kind.currentText(), opening.text(), currency.text()
-                    )
-                name.clear()
-                status.setText("Account created.")
+                    service = AccountService(session)
+                    if editing["id"] is None:
+                        service.create_account(
+                            name.text(), kind.currentText(), opening.text(), currency.text()
+                        )
+                        message = "Account created."
+                    else:
+                        service.update_account(
+                            editing["id"], name.text(), kind.currentText(),
+                            opening.text(), currency.text()
+                        )
+                        message = "Account updated."
+                clear_form()
+                status.setText(message)
                 refresh()
             except Exception as exc:
-                QMessageBox.warning(page, "Could not create account", str(exc))
+                QMessageBox.warning(page, "Could not save account", str(exc))
 
         button = QPushButton("Add account")
         button.clicked.connect(add)
+        cancel_button = QPushButton("Cancel edit")
+        cancel_button.setVisible(False)
+        cancel_button.clicked.connect(lambda: (clear_form(), status.setText("")))
+        edit_button.clicked.connect(begin_edit)
+        delete_button.clicked.connect(delete_selected)
+        archive_button.clicked.connect(toggle_archive)
+        table.itemSelectionChanged.connect(on_selection)
+        table.itemDoubleClicked.connect(lambda _: begin_edit())
         layout.addWidget(button)
+        layout.addWidget(cancel_button)
         page.refresh = refresh
         refresh()
         return page
@@ -156,7 +458,7 @@ class FinanceMainWindow(QMainWindow):
         """Build the transaction entry form, search field, and transaction list."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<h1>Transactions</h1>"))
+        layout.addWidget(self._title("Transactions"))
         form = QFormLayout()
         account = QComboBox()
         tx_type = QComboBox()
@@ -182,8 +484,21 @@ class FinanceMainWindow(QMainWindow):
         table = QTableWidget(0, 6)
         table.setHorizontalHeaderLabels(["Date", "Type", "Payee", "Memo", "Amount", "Account"])
         table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(table)
-        status = QLabel()
+        row_buttons = QHBoxLayout()
+        edit_button = QPushButton("Edit selected")
+        delete_button = QPushButton("Delete selected")
+        edit_button.setEnabled(False)
+        delete_button.setEnabled(False)
+        row_buttons.addWidget(edit_button)
+        row_buttons.addWidget(delete_button)
+        row_buttons.addStretch()
+        layout.addLayout(row_buttons)
+        editing = {"id": None}
+        status = self._named(QLabel(), "statusLabel")
         layout.addWidget(status)
 
         def refresh():
@@ -193,7 +508,8 @@ class FinanceMainWindow(QMainWindow):
                 current_account = account.currentData()
                 account.clear()
                 for a in accounts_list:
-                    account.addItem(f"{a.name} ({a.currency})", a.id)
+                    suffix = "" if a.is_active else " - archived"
+                    account.addItem(f"{a.name} ({a.currency}){suffix}", a.id)
                 if current_account is not None:
                     idx = account.findData(current_account)
                     if idx >= 0:
@@ -208,7 +524,7 @@ class FinanceMainWindow(QMainWindow):
                     if idx >= 0:
                         category.setCurrentIndex(idx)
                 txs = TransactionService(session).list_transactions(
-                    search=search.text()
+                    account_id=account.currentData(), search=search.text()
                 )
                 table.setRowCount(len(txs))
                 for row, tx in enumerate(txs):
@@ -220,28 +536,217 @@ class FinanceMainWindow(QMainWindow):
                         account_obj.name if account_obj else ""
                     ]
                     for col, val in enumerate(vals):
-                        table.setItem(row, col, QTableWidgetItem(str(val)))
+                        item = QTableWidgetItem(str(val))
+                        item.setData(Qt.UserRole, tx.id)
+                        table.setItem(row, col, item)
+
+        def clear_form():
+            editing["id"] = None
+            amount.clear()
+            payee.clear()
+            memo.clear()
+            button.setText("Add transaction")
+            cancel_button.setVisible(False)
+
+        def selected_id():
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            return item.data(Qt.UserRole) if item else None
+
+        def on_selection():
+            tx_id = selected_id()
+            edit_button.setEnabled(tx_id is not None)
+            delete_button.setEnabled(tx_id is not None)
+
+        def begin_edit():
+            tx_id = selected_id()
+            if tx_id is None:
+                return
+            with self.session_factory() as session:
+                tx = session.get(TransactionModel, tx_id)
+                if tx is None:
+                    refresh()
+                    return
+                if tx.transfer_id is not None or tx.transaction_type == "Transfer":
+                    QMessageBox.information(
+                        page, "Transfer",
+                        "Transfers cannot be edited. Delete the transfer and create it again."
+                    )
+                    return
+                editing["id"] = tx.id
+                account.setCurrentIndex(max(account.findData(tx.account_id), 0))
+                tx_type.setCurrentText(tx.transaction_type)
+                tx_date.setDate(tx.transaction_date)
+                amount.setText(str(abs(from_minor_units(tx.signed_amount_minor))))
+                payee.setText(tx.payee_text)
+                memo.setText(tx.memo)
+                category.setCurrentIndex(max(category.findData(tx.category_id), 0))
+            button.setText("Save changes")
+            cancel_button.setVisible(True)
+            status.setText("Editing transaction.")
+
+        def delete_selected():
+            tx_id = selected_id()
+            if tx_id is None:
+                return
+            with self.session_factory() as session:
+                tx = session.get(TransactionModel, tx_id)
+                is_transfer = tx is not None and tx.transfer_id is not None
+            text = "Delete the selected transaction?"
+            if is_transfer:
+                text = "This is part of a transfer. Both sides of the transfer will be deleted."
+            if QMessageBox.question(page, "Delete transaction", text) != QMessageBox.Yes:
+                return
+            try:
+                with self.session_factory() as session:
+                    count = TransactionService(session).delete_transaction(tx_id)
+                if editing["id"] == tx_id:
+                    clear_form()
+                status.setText(f"Deleted {count} transaction(s).")
+                refresh()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not delete transaction", str(exc))
 
         def add():
             try:
                 if account.currentData() is None:
                     raise ValueError("Create an account first")
                 with self.session_factory() as session:
-                    TransactionService(session).add_transaction(
-                        account.currentData(), tx_date.date().toPython(),
-                        amount.text(), tx_type.currentText(), payee.text(),
-                        memo.text(), category.currentData()
-                    )
-                amount.clear()
-                status.setText("Transaction saved.")
+                    service = TransactionService(session)
+                    if editing["id"] is None:
+                        service.add_transaction(
+                            account.currentData(), tx_date.date().toPython(),
+                            amount.text(), tx_type.currentText(), payee.text(),
+                            memo.text(), category.currentData()
+                        )
+                        message = "Transaction saved."
+                    else:
+                        service.update_transaction(
+                            editing["id"], account.currentData(),
+                            tx_date.date().toPython(), amount.text(),
+                            tx_type.currentText(), payee.text(), memo.text(),
+                            category.currentData()
+                        )
+                        message = "Transaction updated."
+                clear_form()
+                status.setText(message)
                 refresh()
             except Exception as exc:
                 QMessageBox.warning(page, "Could not save transaction", str(exc))
 
         button = QPushButton("Add transaction")
         button.clicked.connect(add)
+        cancel_button = QPushButton("Cancel edit")
+        cancel_button.setVisible(False)
+        cancel_button.clicked.connect(lambda: (clear_form(), status.setText("")))
+        edit_button.clicked.connect(begin_edit)
+        delete_button.clicked.connect(delete_selected)
+        table.itemSelectionChanged.connect(on_selection)
+        table.itemDoubleClicked.connect(lambda _: begin_edit())
         search.textChanged.connect(refresh)
+        # activated fires only on user selection, not on refresh() repopulating the list
+        account.activated.connect(refresh)
         layout.addWidget(button)
+        layout.addWidget(cancel_button)
+        page.refresh = refresh
+        refresh()
+        return page
+
+    def transfers_page(self):
+        """Build the form for transfers between accounts, with currency conversion."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._title("Transfers"))
+        form = QFormLayout()
+        source = QComboBox()
+        destination = QComboBox()
+        tx_date = QDateEdit()
+        tx_date.setCalendarPopup(True)
+        tx_date.setDate(date.today())
+        amount = QLineEdit()
+        rate = QLineEdit()
+        rate.setPlaceholderText("Destination units per 1 source unit")
+        received = self._named(QLabel(), "receivedLabel")
+        memo = QLineEdit()
+        form.addRow("From account", source)
+        form.addRow("To account", destination)
+        form.addRow("Date", tx_date)
+        form.addRow("Amount (source currency)", amount)
+        rate_label = QLabel("Exchange rate")
+        form.addRow(rate_label, rate)
+        received_label = QLabel("Amount received")
+        form.addRow(received_label, received)
+        form.addRow("Memo", memo)
+        layout.addLayout(form)
+        status = self._named(QLabel(), "statusLabel")
+        layout.addWidget(status)
+        currencies = {}
+
+        def is_cross_currency():
+            src, dst = source.currentData(), destination.currentData()
+            return (src is not None and dst is not None
+                    and currencies.get(src) != currencies.get(dst))
+
+        def update_preview():
+            cross = is_cross_currency()
+            for widget in (rate_label, rate, received_label, received):
+                widget.setVisible(cross)
+            received.setText("")
+            if not cross:
+                return
+            try:
+                minor = TransferService.convert_minor(
+                    to_minor_units(amount.text()), Decimal(rate.text().strip())
+                )
+                received.setText(
+                    f"{currencies[destination.currentData()]} {from_minor_units(minor):,.2f}"
+                )
+            except Exception:
+                pass
+
+        def refresh():
+            with self.session_factory() as session:
+                accounts_list = AccountService(session).list_accounts(active_only=True)
+            currencies.clear()
+            current = (source.currentData(), destination.currentData())
+            for box, selected in zip((source, destination), current):
+                box.blockSignals(True)
+                box.clear()
+                for a in accounts_list:
+                    box.addItem(f"{a.name} ({a.currency})", a.id)
+                    currencies[a.id] = a.currency
+                idx = box.findData(selected)
+                if idx >= 0:
+                    box.setCurrentIndex(idx)
+                box.blockSignals(False)
+            if destination.currentData() == source.currentData() and destination.count() > 1:
+                destination.setCurrentIndex(1 if source.currentIndex() == 0 else 0)
+            update_preview()
+
+        def transfer():
+            try:
+                if source.currentData() is None or destination.currentData() is None:
+                    raise ValueError("Create two accounts first")
+                with self.session_factory() as session:
+                    TransferService(session).create_transfer(
+                        source.currentData(), destination.currentData(), amount.text(),
+                        tx_date.date().toPython(), memo.text(),
+                        rate.text() if is_cross_currency() else None
+                    )
+                amount.clear()
+                status.setText("Transfer saved.")
+                update_preview()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not save transfer", str(exc))
+
+        button = QPushButton("Transfer funds")
+        button.clicked.connect(transfer)
+        layout.addWidget(button)
+        layout.addStretch()
+        source.currentIndexChanged.connect(update_preview)
+        destination.currentIndexChanged.connect(update_preview)
+        amount.textChanged.connect(update_preview)
+        rate.textChanged.connect(update_preview)
         page.refresh = refresh
         refresh()
         return page
@@ -250,7 +755,7 @@ class FinanceMainWindow(QMainWindow):
         """Build the category creation form and category listing."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<h1>Categories</h1>"))
+        layout.addWidget(self._title("Categories"))
         form = QFormLayout()
         name = QLineEdit()
         kind = QComboBox()
@@ -287,10 +792,11 @@ class FinanceMainWindow(QMainWindow):
         return page
 
     def reports_page(self):
-        """Build the date-range income and expense report page."""
+        """Build the income and expense report with account filter, breakdown and export."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("<h1>Income and Expenses</h1>"))
+        layout.addWidget(self._title("Income and Expenses"))
+        account = QComboBox()
         start = QDateEdit()
         start.setCalendarPopup(True)
         start.setDate(date(date.today().year, 1, 1))
@@ -298,29 +804,90 @@ class FinanceMainWindow(QMainWindow):
         end.setCalendarPopup(True)
         end.setDate(date.today())
         form = QFormLayout()
+        form.addRow("Account", account)
         form.addRow("From", start)
         form.addRow("To", end)
         layout.addLayout(form)
-        result = QLabel()
-        layout.addWidget(result)
+        layout.addWidget(self._named(QLabel("Totals by currency"), "sectionLabel"))
+        summary = QTableWidget(0, 4)
+        summary.setHorizontalHeaderLabels(["Currency", "Income", "Expenses", "Net"])
+        layout.addWidget(summary)
+        layout.addWidget(self._named(QLabel("By category"), "sectionLabel"))
+        breakdown = QTableWidget(0, 4)
+        breakdown.setHorizontalHeaderLabels(["Category", "Currency", "Income", "Expenses"])
+        layout.addWidget(breakdown)
+        for table in (summary, breakdown):
+            table.setEditTriggers(QTableWidget.NoEditTriggers)
+            table.horizontalHeader().setStretchLastSection(True)
+        status = self._named(QLabel(), "statusLabel")
+        layout.addWidget(status)
+
+        def money(minor):
+            return f"{from_minor_units(minor):,.2f}"
+
+        def fill(table, rows):
+            table.setRowCount(len(rows))
+            for row, values in enumerate(rows):
+                for col, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+                    if col >= len(values) - (3 if table is summary else 2):
+                        item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    table.setItem(row, col, item)
 
         def refresh():
             with self.session_factory() as session:
-                data = ReportService(session).income_expense(
-                    start.date().toPython(), end.date().toPython()
-                )
-            income = from_minor_units(data["income_minor"])
-            expenses = from_minor_units(data["expenses_minor"])
-            net = from_minor_units(data["net_minor"])
-            result.setText(
-                f"<h2>Income: EUR {income:,.2f}</h2>"
-                f"<h2>Expenses: EUR {expenses:,.2f}</h2>"
-                f"<h2>Net: EUR {net:,.2f}</h2>"
-            )
+                accounts_list = AccountService(session).list_accounts()
+                current = account.currentData()
+                account.blockSignals(True)
+                account.clear()
+                account.addItem("All accounts", None)
+                for a in accounts_list:
+                    suffix = "" if a.is_active else " - archived"
+                    account.addItem(f"{a.name} ({a.currency}){suffix}", a.id)
+                account.setCurrentIndex(max(account.findData(current), 0))
+                account.blockSignals(False)
+                service = ReportService(session)
+                args = (start.date().toPython(), end.date().toPython(), account.currentData())
+                totals = service.income_expense(*args)
+                categories = service.category_breakdown(*args)
+            fill(summary, [
+                (cur, money(t["income_minor"]), money(t["expenses_minor"]),
+                 money(t["net_minor"]))
+                for cur, t in totals.items()
+            ])
+            fill(breakdown, [
+                (c["category"], c["currency"], money(c["income_minor"]),
+                 money(c["expenses_minor"]))
+                for c in categories
+            ])
 
+        def export_csv():
+            filename, _ = QFileDialog.getSaveFileName(
+                page, "Export transactions", "transactions.csv", "CSV files (*.csv)"
+            )
+            if not filename:
+                return
+            try:
+                with self.session_factory() as session:
+                    txs = ReportService(session).transactions(
+                        start.date().toPython(), end.date().toPython(),
+                        account.currentData()
+                    )
+                    export_transactions_csv(txs, filename)
+                status.setText(f"Exported {len(txs)} transactions.")
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not export", str(exc))
+
+        buttons = QHBoxLayout()
         button = QPushButton("Generate report")
         button.clicked.connect(refresh)
-        layout.addWidget(button)
+        export_button = QPushButton("Export transactions to CSV")
+        export_button.clicked.connect(export_csv)
+        buttons.addWidget(button)
+        buttons.addWidget(export_button)
+        buttons.addStretch()
+        layout.addLayout(buttons)
+        account.activated.connect(refresh)
         page.refresh = refresh
         refresh()
         return page
@@ -337,7 +904,7 @@ class FinanceMainWindow(QMainWindow):
             if not records:
                 raise ValueError("No QIF transactions were found")
             with self.session_factory() as session:
-                accounts = AccountService(session).list_accounts()
+                accounts = AccountService(session).list_accounts(active_only=True)
                 choices = [f"{a.id}: {a.name}" for a in accounts]
             if not choices:
                 raise ValueError("Create a destination account before importing")
@@ -364,3 +931,62 @@ class FinanceMainWindow(QMainWindow):
             self.show_page(self.transactions_page)
         except Exception as exc:
             QMessageBox.critical(self, "QIF import failed", str(exc))
+
+    def import_revolut(self):
+        """Import a Revolut statement CSV, mapping each Revolut product to an account."""
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Select Revolut statement", "", "CSV files (*.csv);;All files (*)"
+        )
+        if not filename:
+            return
+        try:
+            records = parse_revolut_csv(filename)
+            if not records:
+                raise ValueError("No transactions were found in the statement")
+            with self.session_factory() as session:
+                accounts = AccountService(session).list_accounts(active_only=True)
+                choices = [f"{a.id}: {a.name} ({a.currency})" for a in accounts]
+            if not choices:
+                raise ValueError("Create a destination account before importing")
+            skip = "Skip this product"
+            by_product = {}
+            for record in records:
+                by_product.setdefault(record["product"], []).append(record)
+            plan = {}
+            for product, rows in by_product.items():
+                selected, ok = QInputDialog.getItem(
+                    self, "Destination account",
+                    f"Import the {len(rows)} '{product}' rows into:",
+                    choices + [skip], 0, False
+                )
+                if not ok:
+                    return
+                if selected != skip:
+                    plan[product] = int(selected.split(":", 1)[0])
+            if not plan:
+                return
+            lines = [f"{p}: {len(by_product[p])} rows" for p in plan]
+            answer = QMessageBox.question(
+                self, "Confirm Revolut import",
+                f"File: {filename}\n" + "\n".join(lines) +
+                "\n\nPending rows are skipped. Commit this import?"
+            )
+            if answer != QMessageBox.Yes:
+                return
+            imported = skipped = pending = 0
+            with self.session_factory() as session:
+                for product, account_id in plan.items():
+                    result = ImportService(session).commit_revolut(
+                        filename, account_id, by_product[product]
+                    )
+                    imported += result["imported"]
+                    skipped += result["skipped"]
+                    pending += result["pending"]
+            QMessageBox.information(
+                self, "Import complete",
+                f"Imported: {imported}\nSkipped duplicates: {skipped}\n"
+                f"Skipped pending: {pending}"
+            )
+            self.show_page(self.transactions_page)
+        except Exception as exc:
+            QMessageBox.critical(self, "Revolut import failed", str(exc))

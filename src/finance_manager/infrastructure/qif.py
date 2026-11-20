@@ -19,7 +19,12 @@ _CURRENCY_SYMBOLS = (",", "$", "£", "€")
 def parse_qif_date(value: str):
     """Parse a date string using the supported QIF date formats."""
     value = value.strip()
-    for date_format in _DATE_FORMATS:
+    date_formats = _DATE_FORMATS
+    if "'" in value:
+        # Quicken/Money style "DD/MM'YYYY"; the file's regional order is day first.
+        value = value.replace(" ", "").replace("'", "/")
+        date_formats = ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%m/%d/%y")
+    for date_format in date_formats:
         try:
             return datetime.strptime(value, date_format).date()
         except ValueError:
