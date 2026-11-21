@@ -3,31 +3,61 @@ from datetime import date
 from decimal import Decimal
 
 from PySide6.QtCharts import (
-    QBarCategoryAxis, QBarSeries, QBarSet, QChart, QChartView, QPieSeries, QValueAxis
+    QBarCategoryAxis,
+    QBarSeries,
+    QBarSet,
+    QChart,
+    QChartView,
+    QPieSeries,
+    QValueAxis,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
-    QComboBox, QDateEdit, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QPushButton, QStackedWidget,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget, QInputDialog
+    QComboBox,
+    QDateEdit,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QStackedWidget,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
 )
 from sqlalchemy import select
 
 from finance_manager.application.services import (
-    AccountService, CategoryService, ImportService, ReportService,
-    TransactionService, TransferService
+    AccountService,
+    CategoryService,
+    ImportService,
+    ReportService,
+    ScheduledTransactionService,
+    TransactionService,
+    TransferService,
 )
 from finance_manager.domain.enums import AccountType
 from finance_manager.domain.money import from_minor_units, to_minor_units
 from finance_manager.infrastructure.csv_export import export_transactions_csv
 from finance_manager.infrastructure.models import (
-    AccountModel, CategoryModel, TransactionModel
+    AccountModel,
+    CategoryModel,
+    TransactionModel,
 )
 from finance_manager.infrastructure.qif import parse_qif
 from finance_manager.infrastructure.revolut import parse_revolut_csv
 from finance_manager.presentation.themes import (
-    apply_theme, available_themes, chart_colors, saved_theme
+    apply_theme,
+    available_themes,
+    chart_colors,
+    saved_theme,
 )
 
 _PIE_COLORS = (
@@ -71,6 +101,7 @@ class FinanceMainWindow(QMainWindow):
             ("Dashboard", self.dashboard_page),
             ("Accounts", self.accounts_page),
             ("Transactions", self.transactions_page),
+            ("Scheduled", self.scheduled_transactions_page),
             ("Transfers", self.transfers_page),
             ("Categories", self.categories_page),
             ("Reports", self.reports_page),
@@ -148,6 +179,11 @@ class FinanceMainWindow(QMainWindow):
             card_layout.addWidget(value)
             cards.addWidget(card)
         layout.addLayout(cards)
+        scheduled_reminder = QPushButton()
+        scheduled_reminder.clicked.connect(
+            lambda: self.show_page(self.scheduled_transactions_page)
+        )
+        layout.addWidget(scheduled_reminder)
 
         charts = QHBoxLayout()
         bar_view = QChartView()
@@ -254,6 +290,7 @@ class FinanceMainWindow(QMainWindow):
             colors = chart_colors()
             with self.session_factory() as session:
                 accounts = AccountService(session).list_accounts()
+                due_schedules = ScheduledTransactionService(session).due_schedules()
                 currencies = sorted({a.currency for a in accounts})
                 chosen = currency.currentText()
                 currency.blockSignals(True)
@@ -280,6 +317,17 @@ class FinanceMainWindow(QMainWindow):
                 monthly = service.monthly_totals(start, end, cur, by=by)
                 categories = service.category_breakdown(start, end)
 
+            due_count = len(due_schedules)
+            if due_count == 1:
+                scheduled_reminder.setText(
+                    "1 scheduled transaction is due. Review it"
+                )
+            elif due_count:
+                scheduled_reminder.setText(
+                    f"{due_count} scheduled transactions are due. Review them"
+                )
+            else:
+                scheduled_reminder.setText("No scheduled transactions due")
             totals_key = {
                 "income": "income_minor", "expenses": "expenses_minor", "net": "net_minor"
             }
@@ -648,6 +696,195 @@ class FinanceMainWindow(QMainWindow):
         account.activated.connect(refresh)
         layout.addWidget(button)
         layout.addWidget(cancel_button)
+        page.refresh = refresh
+        refresh()
+        return page
+
+    def scheduled_transactions_page(self):
+        """Build monthly transaction reminders and their manual posting controls."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(self._title("Scheduled Transactions"))
+        layout.addWidget(QLabel(
+            "Monthly reminders are not posted automatically. Review each due item "
+            "and post it when appropriate."
+        ))
+
+        form = QFormLayout()
+        name = QLineEdit()
+        account = QComboBox()
+        transaction_type = QComboBox()
+        transaction_type.addItems(["Expense", "Income"])
+        amount = QLineEdit()
+        due_date = QDateEdit()
+        due_date.setCalendarPopup(True)
+        due_date.setDate(date.today())
+        category = QComboBox()
+        payee = QLineEdit()
+        memo = QLineEdit()
+        form.addRow("Reminder name", name)
+        form.addRow("Account", account)
+        form.addRow("Type", transaction_type)
+        form.addRow("Amount", amount)
+        form.addRow("First due date", due_date)
+        form.addRow("Category", category)
+        form.addRow("Payee", payee)
+        form.addRow("Memo", memo)
+        layout.addLayout(form)
+
+        status = self._named(QLabel(), "statusLabel")
+        layout.addWidget(status)
+        table = QTableWidget(0, 6)
+        table.setHorizontalHeaderLabels([
+            "Name", "Account", "Type", "Amount", "Next due", "Status"
+        ])
+        table.setSelectionBehavior(QTableWidget.SelectRows)
+        table.setSelectionMode(QTableWidget.SingleSelection)
+        table.setEditTriggers(QTableWidget.NoEditTriggers)
+        layout.addWidget(table)
+
+        action_row = QHBoxLayout()
+        add_button = QPushButton("Add monthly reminder")
+        post_button = QPushButton("Post due transaction")
+        pause_button = QPushButton("Pause selected")
+        post_button.setEnabled(False)
+        pause_button.setEnabled(False)
+        action_row.addWidget(add_button)
+        action_row.addWidget(post_button)
+        action_row.addWidget(pause_button)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+        schedule_states = {}
+
+        def refresh():
+            with self.session_factory() as session:
+                accounts_list = AccountService(session).list_accounts(active_only=True)
+                categories_list = CategoryService(session).list_categories()
+                schedules = ScheduledTransactionService(session).list_schedules()
+
+            selected_account = account.currentData()
+            account.blockSignals(True)
+            account.clear()
+            for item in accounts_list:
+                account.addItem(f"{item.name} ({item.currency})", item.id)
+            selected_index = account.findData(selected_account)
+            if selected_index >= 0:
+                account.setCurrentIndex(selected_index)
+            account.blockSignals(False)
+
+            selected_category = category.currentData()
+            category.clear()
+            category.addItem("Uncategorised", None)
+            for item in categories_list:
+                category.addItem(f"{item.name} ({item.kind})", item.id)
+            selected_index = category.findData(selected_category)
+            if selected_index >= 0:
+                category.setCurrentIndex(selected_index)
+
+            today = date.today()
+            account_names = {
+                item.id: f"{item.name} ({item.currency})" for item in accounts_list
+            }
+            schedule_states.clear()
+            table.setRowCount(len(schedules))
+            for row, item in enumerate(schedules):
+                account_name = account_names.get(item.account_id, "Unavailable")
+                if not item.is_active:
+                    state = "Paused"
+                elif item.next_due_date <= today:
+                    state = "Due"
+                else:
+                    state = "Upcoming"
+                schedule_states[item.id] = (item.is_active, item.next_due_date)
+                values = [
+                    item.name,
+                    account_name,
+                    item.transaction_type,
+                    f"{from_minor_units(item.amount_minor):,.2f}",
+                    item.next_due_date.isoformat(),
+                    state,
+                ]
+                for column, value in enumerate(values):
+                    table_item = QTableWidgetItem(str(value))
+                    if column == 0:
+                        table_item.setData(Qt.UserRole, item.id)
+                    table.setItem(row, column, table_item)
+            on_selection()
+
+        def selected_schedule_id():
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            return item.data(Qt.UserRole) if item else None
+
+        def on_selection():
+            schedule_id = selected_schedule_id()
+            state = schedule_states.get(schedule_id)
+            selected = state is not None
+            pause_button.setEnabled(selected)
+            if selected:
+                active, next_due = state
+                pause_button.setText("Pause selected" if active else "Resume selected")
+                post_button.setEnabled(active and next_due <= date.today())
+            else:
+                post_button.setEnabled(False)
+
+        def add_schedule():
+            try:
+                if account.currentData() is None:
+                    raise ValueError("Create an active account first")
+                with self.session_factory() as session:
+                    ScheduledTransactionService(session).create_schedule(
+                        name.text(),
+                        account.currentData(),
+                        amount.text(),
+                        transaction_type.currentText(),
+                        due_date.date().toPython(),
+                        category.currentData(),
+                        payee.text(),
+                        memo.text(),
+                    )
+                name.clear()
+                amount.clear()
+                payee.clear()
+                memo.clear()
+                status.setText("Monthly reminder created.")
+                refresh()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not create reminder", str(exc))
+
+        def post_selected():
+            schedule_id = selected_schedule_id()
+            if schedule_id is None:
+                return
+            try:
+                with self.session_factory() as session:
+                    ScheduledTransactionService(session).post_due(schedule_id)
+                status.setText("Scheduled transaction posted.")
+                refresh()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not post transaction", str(exc))
+
+        def toggle_pause():
+            schedule_id = selected_schedule_id()
+            state = schedule_states.get(schedule_id)
+            if state is None:
+                return
+            try:
+                with self.session_factory() as session:
+                    ScheduledTransactionService(session).set_active(
+                        schedule_id, not state[0]
+                    )
+                status.setText(
+                    "Reminder resumed." if not state[0] else "Reminder paused."
+                )
+                refresh()
+            except Exception as exc:
+                QMessageBox.warning(page, "Could not update reminder", str(exc))
+
+        table.itemSelectionChanged.connect(on_selection)
+        add_button.clicked.connect(add_schedule)
+        post_button.clicked.connect(post_selected)
+        pause_button.clicked.connect(toggle_pause)
         page.refresh = refresh
         refresh()
         return page

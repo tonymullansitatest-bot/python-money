@@ -1,6 +1,7 @@
+import calendar
 import hashlib
 from datetime import date
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -8,10 +9,17 @@ from sqlalchemy import select
 from finance_manager.domain.enums import AccountType, TransactionType
 from finance_manager.domain.money import to_minor_units
 from finance_manager.infrastructure.models import (
-    AccountModel, CategoryModel, ImportBatchModel, TransactionModel
+    AccountModel,
+    CategoryModel,
+    ImportBatchModel,
+    ScheduledTransactionModel,
+    TransactionModel,
 )
 from finance_manager.infrastructure.repositories import (
-    AccountRepository, CategoryRepository, PayeeRepository, TransactionRepository
+    AccountRepository,
+    CategoryRepository,
+    PayeeRepository,
+    TransactionRepository,
 )
 
 
@@ -137,7 +145,10 @@ class TransactionService:
         magnitude = to_minor_units(amount)
         if magnitude <= 0:
             raise ValueError("Amount must be greater than zero")
-        if category_id is not None and self.session.get(CategoryModel, category_id) is None:
+        if (
+            category_id is not None
+            and self.session.get(CategoryModel, category_id) is None
+        ):
             raise ValueError("Category not found")
         signed = magnitude if transaction_type == "Income" else -magnitude
         self.payees.get_or_create(payee)
@@ -284,6 +295,123 @@ class TransferService:
             self.session.rollback()
             raise
         return transfer_id
+
+
+class ScheduledTransactionService:
+    def __init__(self, session):
+        self.session = session
+
+    def create_schedule(self, name, account_id, amount, transaction_type, due_date,
+                        category_id=None, payee="", memo=""):
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Schedule name is required")
+        if transaction_type not in (
+            TransactionType.INCOME.value, TransactionType.EXPENSE.value
+        ):
+            raise ValueError("Transaction type must be Income or Expense")
+        account = self.session.get(AccountModel, account_id)
+        if account is None or not account.is_active:
+            raise ValueError("An active account is required")
+        amount_minor = to_minor_units(amount)
+        if amount_minor <= 0:
+            raise ValueError("Amount must be greater than zero")
+        if (
+            category_id is not None
+            and self.session.get(CategoryModel, category_id) is None
+        ):
+            raise ValueError("Category not found")
+
+        schedule = ScheduledTransactionModel(
+            name=clean_name,
+            account_id=account_id,
+            category_id=category_id,
+            amount_minor=amount_minor,
+            transaction_type=transaction_type,
+            payee_text=(payee or "").strip(),
+            memo=(memo or "").strip(),
+            next_due_date=due_date,
+            due_day=due_date.day,
+        )
+        self.session.add(schedule)
+        self.session.commit()
+        return schedule
+
+    def list_schedules(self, active_only=False):
+        stmt = select(ScheduledTransactionModel).order_by(
+            ScheduledTransactionModel.next_due_date,
+            ScheduledTransactionModel.name,
+        )
+        if active_only:
+            stmt = stmt.where(ScheduledTransactionModel.is_active.is_(True))
+        return list(self.session.scalars(stmt))
+
+    def due_schedules(self, as_of=None):
+        as_of = as_of or date.today()
+        stmt = (
+            select(ScheduledTransactionModel)
+            .where(
+                ScheduledTransactionModel.is_active.is_(True),
+                ScheduledTransactionModel.next_due_date <= as_of,
+            )
+            .order_by(
+                ScheduledTransactionModel.next_due_date,
+                ScheduledTransactionModel.name,
+            )
+        )
+        return list(self.session.scalars(stmt))
+
+    def set_active(self, schedule_id, active: bool):
+        schedule = self.session.get(ScheduledTransactionModel, schedule_id)
+        if schedule is None:
+            raise ValueError("Scheduled transaction not found")
+        schedule.is_active = active
+        self.session.commit()
+        return schedule
+
+    def post_due(self, schedule_id, as_of=None):
+        as_of = as_of or date.today()
+        schedule = self.session.get(ScheduledTransactionModel, schedule_id)
+        if schedule is None:
+            raise ValueError("Scheduled transaction not found")
+        if not schedule.is_active:
+            raise ValueError("Scheduled transaction is paused")
+        if schedule.next_due_date > as_of:
+            raise ValueError("Scheduled transaction is not due yet")
+
+        account = self.session.get(AccountModel, schedule.account_id)
+        if account is None or not account.is_active:
+            raise ValueError("The scheduled account is not active")
+        signed_amount = (
+            schedule.amount_minor
+            if schedule.transaction_type == TransactionType.INCOME.value
+            else -schedule.amount_minor
+        )
+        transaction = TransactionModel(
+            account_id=schedule.account_id,
+            transaction_date=schedule.next_due_date,
+            signed_amount_minor=signed_amount,
+            transaction_type=schedule.transaction_type,
+            payee_text=schedule.payee_text or schedule.name,
+            memo=schedule.memo,
+            category_id=schedule.category_id,
+        )
+
+        next_month = schedule.next_due_date.month % 12 + 1
+        next_year = schedule.next_due_date.year
+        if schedule.next_due_date.month == 12:
+            next_year += 1
+        next_day = min(
+            schedule.due_day, calendar.monthrange(next_year, next_month)[1]
+        )
+        schedule.next_due_date = date(next_year, next_month, next_day)
+        self.session.add(transaction)
+        try:
+            self.session.commit()
+        except Exception:
+            self.session.rollback()
+            raise
+        return transaction
 
 
 class ReportService:

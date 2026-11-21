@@ -4,7 +4,12 @@ from decimal import Decimal
 import pytest
 
 from finance_manager.application.services import (
-    AccountService, CategoryService, ReportService, TransactionService, TransferService
+    AccountService,
+    CategoryService,
+    ReportService,
+    ScheduledTransactionService,
+    TransactionService,
+    TransferService,
 )
 from finance_manager.domain.enums import AccountType
 
@@ -109,6 +114,56 @@ def test_cross_currency_transfer_converts_amount(session):
         transfers.create_transfer(eur.id, usd.id, "10.00", date(2026, 2, 1))
     with pytest.raises(ValueError):
         transfers.create_transfer(eur.id, usd.id, "10.00", date(2026, 2, 1), "", "0")
+
+
+def test_scheduled_transaction_posts_manually_and_advances_month_end(session):
+    account = AccountService(session).create_account("Current")
+    category = CategoryService(session).create_category("Utilities", "Expense")
+    schedules = ScheduledTransactionService(session)
+    schedule = schedules.create_schedule(
+        "Electricity bill", account.id, "100.00", "Expense",
+        date(2026, 1, 31), category.id, "Power company"
+    )
+
+    assert schedules.due_schedules(date(2026, 1, 30)) == []
+    with pytest.raises(ValueError, match="not due"):
+        schedules.post_due(schedule.id, date(2026, 1, 30))
+
+    posted = schedules.post_due(schedule.id, date(2026, 1, 31))
+    assert (posted.transaction_date, posted.signed_amount_minor) == (
+        date(2026, 1, 31), -10000
+    )
+    assert posted.category_id == category.id
+    assert schedule.next_due_date == date(2026, 2, 28)
+    assert AccountService(session).balance(account.id) == -10000
+
+    schedules.post_due(schedule.id, date(2026, 2, 28))
+    assert schedule.next_due_date == date(2026, 3, 31)
+
+    year_end = schedules.create_schedule(
+        "Annual bill", account.id, "50", "Expense", date(2026, 12, 31)
+    )
+    schedules.post_due(year_end.id, date(2026, 12, 31))
+    assert year_end.next_due_date == date(2027, 1, 31)
+
+
+def test_scheduled_transaction_pause_and_overdue_occurrences(session):
+    account = AccountService(session).create_account("Current")
+    schedules = ScheduledTransactionService(session)
+    schedule = schedules.create_schedule(
+        "Monthly bill", account.id, "25", "Expense", date(2026, 1, 15)
+    )
+    schedules.set_active(schedule.id, False)
+    assert schedules.due_schedules(date(2026, 2, 15)) == []
+    with pytest.raises(ValueError, match="paused"):
+        schedules.post_due(schedule.id, date(2026, 2, 15))
+
+    schedules.set_active(schedule.id, True)
+    first = schedules.post_due(schedule.id, date(2026, 2, 15))
+    second = schedules.post_due(schedule.id, date(2026, 2, 15))
+    assert first.transaction_date == date(2026, 1, 15)
+    assert second.transaction_date == date(2026, 2, 15)
+    assert schedule.next_due_date == date(2026, 3, 15)
 
 
 def test_reports_group_by_currency_category_and_account(session):

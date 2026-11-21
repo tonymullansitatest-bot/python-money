@@ -38,6 +38,8 @@ Services coordinate use cases:
 - `AccountService`: create and list accounts.
 - `CategoryService`: create and list categories.
 - `TransactionService`: post, list and search transactions.
+- `ScheduledTransactionService`: create monthly reminders, post due occurrences and
+  advance their due dates.
 - `TransferService`: post balanced transfer entries in one database transaction.
 - `ImportService`: parse QIF, preview and commit imported records.
 - `ReportService`: aggregate income and expenses.
@@ -60,6 +62,8 @@ SQLAlchemy models, database session factory, repositories, QIF parser and CSV ex
 - Split transactions are a future extension; do not approximate splits by duplicating
   the parent transaction.
 - Opening balance is stored on the account and is not an income/expense transaction.
+- Scheduled transactions are reminders; posting one creates a normal income/expense
+  transaction and advances the next due date in the same commit.
 
 ## Microsoft Money Plus Sunset migration
 

@@ -6,6 +6,7 @@
 - `categories`: hierarchical income/expense categories.
 - `payees`: transaction counterparties.
 - `transactions`: dated signed ledger entries, linked to accounts.
+- `scheduled_transactions`: monthly transaction templates with a next due date.
 - `import_batches`: provenance and summary of each import.
 - `transfers`: transfer grouping identifier is stored on both ledger entries.
 
@@ -15,6 +16,7 @@
 - Category 1 -> many Transactions.
 - Payee 1 -> many Transactions.
 - ImportBatch 1 -> many Transactions (optional provenance).
+- Account and Category may be referenced by many scheduled transactions.
 
 ## Monetary storage
 
@@ -26,3 +28,6 @@ posting; currencies with other minor-unit conventions need a currency metadata u
 
 `opening_balance_minor + SUM(signed_amount_minor)` for an account. A transfer contributes
 a negative amount to the source account and a positive amount to the destination.
+
+Scheduled transactions are not included in balances or reports until manually posted.
+Posting creates a standard transaction and advances the reminder's due date atomically.

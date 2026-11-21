@@ -2,7 +2,8 @@
 
 A local-first Windows desktop personal finance application built with Python, PySide6,
 SQLAlchemy and SQLite. The initial MVP supports accounts, categories, payees,
-transactions, account transfers, a dashboard, CSV export and QIF import.
+transactions, monthly scheduled-transaction reminders, account transfers, a dashboard,
+CSV export and QIF import.
 
 ## Status
 
@@ -60,8 +61,18 @@ ruff format .
 2. Open **Accounts** and create a current or savings account with an opening balance.
 3. Open **Categories** and add categories such as Salary, Groceries and Utilities.
 4. Open **Transactions** to enter income and expenses.
-5. Use **Import QIF** to import an exported Microsoft Money account file.
-6. Review the dashboard and export transactions to CSV.
+5. Use **Scheduled** to create monthly bill reminders. Due items appear on the dashboard
+   and are posted only when you select them.
+6. Use **Import QIF** to import an exported Microsoft Money account file.
+7. Review the dashboard and export transactions to CSV.
+
+## Scheduled transactions
+
+Scheduled transactions are monthly reminders, not automatic payments or ledger entries.
+When a reminder is due, review it and choose **Post due transaction** to add it to the
+account. The next due date advances one month; if a date falls beyond a month's last
+day, it uses that month's last day while retaining the original day for later months.
+Overdue months are posted one at a time. Reminders can be paused and resumed.
 
 ## QIF import notes
 

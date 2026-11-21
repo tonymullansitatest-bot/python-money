@@ -1,7 +1,6 @@
 from datetime import date, datetime, timezone
-from sqlalchemy import (
-    Boolean, Date, DateTime, ForeignKey, Integer, String, Text
-)
+
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from finance_manager.infrastructure.database import Base
@@ -83,3 +82,26 @@ class TransactionModel(Base):
     )
     account: Mapped[AccountModel] = relationship(back_populates="transactions")
     category: Mapped[CategoryModel | None] = relationship()
+
+
+class ScheduledTransactionModel(Base):
+    __tablename__ = "scheduled_transactions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), nullable=True
+    )
+    amount_minor: Mapped[int] = mapped_column(Integer, nullable=False)
+    transaction_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    payee_text: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    memo: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    next_due_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    due_day: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
+    )
