@@ -3,6 +3,7 @@ SQLAlchemy>=2.0
 alembic>=1.13
 pydantic>=2.7
 platformdirs>=4.2
+openai>=3.57
 
 [dev]
 pytest>=8.0

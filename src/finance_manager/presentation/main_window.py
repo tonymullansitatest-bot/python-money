@@ -55,6 +55,7 @@ from finance_manager.infrastructure.models import (
 )
 from finance_manager.infrastructure.qif import parse_qif
 from finance_manager.infrastructure.revolut import parse_revolut_csv
+from finance_manager.presentation.ai_page import AIPage
 from finance_manager.presentation.themes import (
     apply_theme,
     available_themes,
@@ -108,6 +109,7 @@ class FinanceMainWindow(QMainWindow):
             ("Transfers", self.transfers_page),
             ("Categories", self.categories_page),
             ("Reports", self.reports_page),
+            ("AI Assistant", self.ai_page),
         ]:
             button = QPushButton(title)
             button.clicked.connect(lambda checked=False, b=builder: self.show_page(b))
@@ -147,6 +149,9 @@ class FinanceMainWindow(QMainWindow):
         refresh = getattr(self.pages[key], "refresh", None)
         if refresh:
             refresh()
+
+    def ai_page(self):
+        return AIPage()
 
     def dashboard_page(self):
         """Build the dashboard: overview, monthly chart, spending pie and balances."""

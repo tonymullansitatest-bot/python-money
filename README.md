@@ -17,7 +17,7 @@ your original `.mny` file and a separate backup untouched.
 
 - Windows 10/11 (other platforms may work)
 - Python 3.11 or later
-- Internet access for the initial package installation only
+- Internet access for the initial package installation and optional AI requests
 
 ## Setup (PowerShell)
 
@@ -82,6 +82,22 @@ Pension balances and activity are excluded from the ordinary dashboard, income,
 expense and net savings reports, including imported pension transactions. Pension
 accounts cannot be converted to or from another account type. Valuation changes
 are manual adjustments, not automatic investment pricing or tax calculations.
+
+## AI assistant
+
+The **AI Assistant** answers general finance questions or summarises manually entered,
+non-sensitive text. It cannot access or change your accounts and does not automatically
+send database records. Do not enter transaction details, account identifiers, names,
+credentials or other personal or confidential information. Confirm each request before
+it is sent to OpenAI; the app does not automatically detect sensitive text. Requests
+require internet access and may incur API charges.
+
+Set `OPENAI_API_KEY` in the environment before launching the application. The default
+model is `gpt-6.1-terra`; optionally set `OPENAI_MODEL` to a model available to your API
+account. The app does not save conversations and sets `store=False` on requests, but
+OpenAI's [data retention policy](https://developers.openai.com/api/docs/guides/your-data)
+may still apply. Responses can be inaccurate and are not financial, investment or tax
+advice.
 
 ## Scheduled transactions
 

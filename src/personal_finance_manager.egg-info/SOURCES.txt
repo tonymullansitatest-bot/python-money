@@ -12,10 +12,14 @@ src/finance_manager/infrastructure/__init__.py
 src/finance_manager/infrastructure/csv_export.py
 src/finance_manager/infrastructure/database.py
 src/finance_manager/infrastructure/models.py
+src/finance_manager/infrastructure/openai_assistant.py
 src/finance_manager/infrastructure/qif.py
 src/finance_manager/infrastructure/repositories.py
+src/finance_manager/infrastructure/revolut.py
 src/finance_manager/presentation/__init__.py
+src/finance_manager/presentation/ai_page.py
 src/finance_manager/presentation/main_window.py
+src/finance_manager/presentation/themes.py
 src/personal_finance_manager.egg-info/PKG-INFO
 src/personal_finance_manager.egg-info/SOURCES.txt
 src/personal_finance_manager.egg-info/dependency_links.txt

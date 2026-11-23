@@ -30,7 +30,7 @@ QPushButton {{
 }}
 QPushButton:hover {{ background: {accent_hover}; }}
 QPushButton:pressed {{ background: {accent_hover}; }}
-QLineEdit, QComboBox, QDateEdit, QSpinBox {{
+QLineEdit, QPlainTextEdit, QComboBox, QDateEdit, QSpinBox {{
     background: {input_bg}; color: {fg}; border: 1px solid {border};
     padding: 4px; border-radius: 4px;
 }}

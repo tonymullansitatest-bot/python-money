@@ -53,6 +53,8 @@ amounts use `Decimal` at application boundaries and integer minor units in stora
 ### Infrastructure
 
 SQLAlchemy models, database session factory, repositories, QIF parser and CSV exporter.
+The optional AI assistant sends only manually entered text to OpenAI after confirmation;
+it has no database access or tools for changing records.
 
 ## Important accounting conventions
 
