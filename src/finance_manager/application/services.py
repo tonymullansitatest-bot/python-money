@@ -32,6 +32,8 @@ class AccountService:
                        opening_balance="0.00", currency="EUR"):
         if not name.strip():
             raise ValueError("Account name is required")
+        if account_type not in [t.value for t in AccountType]:
+            raise ValueError("Unknown account type")
         if len(currency) != 3:
             raise ValueError("Currency must be a 3-letter code")
         account = AccountModel(
@@ -64,6 +66,12 @@ class AccountService:
             raise ValueError("Account name is required")
         if account_type not in [t.value for t in AccountType]:
             raise ValueError("Unknown account type")
+        if (account.account_type == AccountType.PENSION.value) != (
+            account_type == AccountType.PENSION.value
+        ):
+            raise ValueError(
+                "Pension accounts cannot be converted to or from another type"
+            )
         if len(currency.strip()) != 3:
             raise ValueError("Currency must be a 3-letter code")
         new_currency = currency.strip().upper()
@@ -122,6 +130,39 @@ class CategoryService:
 
     def list_categories(self):
         return self.repo.list()
+
+
+class PensionService:
+    def __init__(self, session):
+        self.session = session
+
+    def add_activity(self, account_id, tx_date, amount, activity, memo=""):
+        account = self.session.get(AccountModel, account_id)
+        if account is None or account.account_type != AccountType.PENSION.value:
+            raise ValueError("A pension account is required")
+        if not account.is_active:
+            raise ValueError("Pension account is archived")
+        signs = {
+            "Contribution": 1,
+            "Withdrawal": -1,
+            "Valuation gain": 1,
+            "Valuation loss": -1,
+        }
+        if activity not in signs:
+            raise ValueError("Unknown pension activity")
+        minor = to_minor_units(amount)
+        if minor <= 0:
+            raise ValueError("Amount must be greater than zero")
+        tx = TransactionModel(
+            account_id=account_id,
+            transaction_date=tx_date,
+            signed_amount_minor=signs[activity] * minor,
+            transaction_type=activity,
+            memo=(memo or "").strip(),
+        )
+        self.session.add(tx)
+        self.session.commit()
+        return tx
 
 
 class TransactionService:
@@ -428,6 +469,7 @@ class ReportService:
                 TransactionModel.transaction_date >= start_date,
                 TransactionModel.transaction_date <= end_date,
                 TransactionModel.transaction_type.in_(["Income", "Expense"]),
+                AccountModel.account_type != AccountType.PENSION.value,
             )
             .order_by(TransactionModel.transaction_date, TransactionModel.id)
         )

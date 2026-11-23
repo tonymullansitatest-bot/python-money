@@ -6,6 +6,7 @@ import pytest
 from finance_manager.application.services import (
     AccountService,
     CategoryService,
+    PensionService,
     ReportService,
     ScheduledTransactionService,
     TransactionService,
@@ -37,6 +38,58 @@ def test_transfer_is_balanced_and_not_income_expense(session):
     assert service.balance(b.id) == 2500
     report = ReportService(session).income_expense(date(2026, 1, 1), date(2026, 12, 31))
     assert report == {}
+
+
+def test_pension_activity_transfers_and_reporting_are_separate(session):
+    accounts = AccountService(session)
+    current = accounts.create_account("Current", opening_balance="1000")
+    pension = accounts.create_account("Pension", AccountType.PENSION.value, "500")
+    activities = PensionService(session)
+    TransferService(session).create_transfer(
+        current.id, pension.id, "100", date(2026, 1, 1)
+    )
+    activities.add_activity(pension.id, date(2026, 1, 2), "50", "Contribution")
+    activities.add_activity(pension.id, date(2026, 1, 3), "20", "Withdrawal")
+    activities.add_activity(pension.id, date(2026, 1, 4), "30", "Valuation gain")
+    activities.add_activity(pension.id, date(2026, 1, 5), "10", "Valuation loss")
+    # Imported pension records can still use ordinary income/expense types.
+    TransactionService(session).add_transaction(
+        pension.id, date(2026, 1, 6), "5", "Income"
+    )
+    TransactionService(session).add_transaction(
+        current.id, date(2026, 1, 7), "200", "Income"
+    )
+    assert accounts.balance(current.id) == 110000
+    assert accounts.balance(pension.id) == 65500
+    reports = ReportService(session)
+    span = (date(2026, 1, 1), date(2026, 1, 31))
+    assert reports.income_expense(*span) == {
+        "EUR": {"income_minor": 20000, "expenses_minor": 0, "net_minor": 20000}
+    }
+    assert reports.income_expense(*span, account_id=pension.id) == {}
+    assert len(reports.transactions(*span)) == 1
+    assert reports.category_breakdown(*span)[0]["income_minor"] == 20000
+    assert reports.monthly_totals(*span, "EUR") == [("2026-01", 20000, 0)]
+
+
+def test_pension_activity_validation_and_account_type_lock(session):
+    accounts = AccountService(session)
+    current = accounts.create_account("Current")
+    pension = accounts.create_account("Pension", AccountType.PENSION.value)
+    service = PensionService(session)
+    with pytest.raises(ValueError, match="pension account"):
+        service.add_activity(current.id, date.today(), "1", "Contribution")
+    with pytest.raises(ValueError, match="greater than zero"):
+        service.add_activity(pension.id, date.today(), "0", "Contribution")
+    with pytest.raises(ValueError, match="Unknown pension activity"):
+        service.add_activity(pension.id, date.today(), "1", "Income")
+    with pytest.raises(ValueError, match="cannot be converted"):
+        accounts.update_account(pension.id, "Pension", "Savings", "0", "EUR")
+    with pytest.raises(ValueError, match="cannot be converted"):
+        accounts.update_account(current.id, "Current", "Pension", "0", "EUR")
+    accounts.set_active(pension.id, False)
+    with pytest.raises(ValueError, match="archived"):
+        service.add_activity(pension.id, date.today(), "1", "Contribution")
 
 
 def test_update_and_delete_transaction(session):

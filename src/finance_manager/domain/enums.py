@@ -4,6 +4,7 @@ from enum import Enum
 class AccountType(str, Enum):
     CURRENT = "Current"
     SAVINGS = "Savings"
+    PENSION = "Pension"
     CREDIT_CARD = "Credit Card"
     CASH = "Cash"
     LOAN = "Loan"

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -38,6 +39,7 @@ from finance_manager.application.services import (
     AccountService,
     CategoryService,
     ImportService,
+    PensionService,
     ReportService,
     ScheduledTransactionService,
     TransactionService,
@@ -100,6 +102,7 @@ class FinanceMainWindow(QMainWindow):
         for title, builder in [
             ("Dashboard", self.dashboard_page),
             ("Accounts", self.accounts_page),
+            ("Pensions", self.pensions_page),
             ("Transactions", self.transactions_page),
             ("Scheduled", self.scheduled_transactions_page),
             ("Transfers", self.transfers_page),
@@ -202,7 +205,8 @@ class FinanceMainWindow(QMainWindow):
         table.setMaximumHeight(150)
         layout.addWidget(table)
         note = self._named(QLabel(
-            "Charts and totals cover one currency at a time and exclude transfers. "
+            "Charts and totals cover one currency at a time and exclude transfers "
+            "and pension activity. "
             "Balances are shown per account currency."
         ), "noteLabel")
         note.setWordWrap(True)
@@ -289,7 +293,10 @@ class FinanceMainWindow(QMainWindow):
         def refresh():
             colors = chart_colors()
             with self.session_factory() as session:
-                accounts = AccountService(session).list_accounts()
+                accounts = [
+                    a for a in AccountService(session).list_accounts()
+                    if a.account_type != AccountType.PENSION.value
+                ]
                 due_schedules = ScheduledTransactionService(session).due_schedules()
                 currencies = sorted({a.currency for a in accounts})
                 chosen = currency.currentText()
@@ -342,26 +349,36 @@ class FinanceMainWindow(QMainWindow):
         page.refresh = refresh
         return page
 
-    def accounts_page(self):
+    def pensions_page(self):
+        return self.accounts_page(pension=True)
+
+    def accounts_page(self, pension=False):
         """Build the account creation form and account listing."""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.addWidget(self._title("Accounts"))
+        layout.addWidget(self._title("Pensions" if pension else "Accounts"))
         form = QFormLayout()
         name = QLineEdit()
         kind = QComboBox()
-        kind.addItems([x.value for x in AccountType])
+        kind.addItems([
+            x.value for x in AccountType
+            if (x == AccountType.PENSION) == pension
+        ])
         opening = QLineEdit("0.00")
         currency = QLineEdit("EUR")
         form.addRow("Account name", name)
-        form.addRow("Account type", kind)
+        if not pension:
+            form.addRow("Account type", kind)
         form.addRow("Opening balance", opening)
         form.addRow("Currency", currency)
         layout.addLayout(form)
         status = self._named(QLabel(), "statusLabel")
         layout.addWidget(status)
-        table = QTableWidget(0, 5)
-        table.setHorizontalHeaderLabels(["ID", "Name", "Type", "Currency", "Status"])
+        table = QTableWidget(0, 6 if pension else 5)
+        headers = ["ID", "Name", "Type", "Currency", "Status"]
+        if pension:
+            headers.append("Balance")
+        table.setHorizontalHeaderLabels(headers)
         table.setSelectionBehavior(QTableWidget.SelectRows)
         table.setSelectionMode(QTableWidget.SingleSelection)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -380,17 +397,26 @@ class FinanceMainWindow(QMainWindow):
 
         def refresh():
             with self.session_factory() as session:
-                accounts = AccountService(session).list_accounts()
+                accounts = [
+                    a for a in AccountService(session).list_accounts()
+                    if (a.account_type == AccountType.PENSION.value) == pension
+                ]
                 archived.clear()
                 table.setRowCount(len(accounts))
                 for row, item in enumerate(accounts):
                     archived[item.id] = not item.is_active
-                    for col, value in enumerate([
+                    values = [
                         item.id, item.name, item.account_type, item.currency,
                         "Active" if item.is_active else "Archived"
-                    ]):
+                    ]
+                    if pension:
+                        balance = AccountService(session).balance(item.id)
+                        values.append(f"{from_minor_units(balance):,.2f}")
+                    for col, value in enumerate(values):
                         table.setItem(row, col, QTableWidgetItem(str(value)))
             on_selection()
+            if pension:
+                refresh_activity()
 
         def clear_form():
             editing["id"] = None
@@ -498,8 +524,151 @@ class FinanceMainWindow(QMainWindow):
         table.itemDoubleClicked.connect(lambda _: begin_edit())
         layout.addWidget(button)
         layout.addWidget(cancel_button)
+        if pension:
+            layout.addWidget(self._named(QLabel("Pension activity"), "sectionLabel"))
+            activity_form = QFormLayout()
+            pension_account = QComboBox()
+            pension_account.setObjectName("pensionAccount")
+            activity_type = QComboBox()
+            activity_type.setObjectName("pensionActivityType")
+            activity_type.addItems([
+                "Contribution", "Withdrawal", "Valuation gain", "Valuation loss"
+            ])
+            activity_date = QDateEdit()
+            activity_date.setCalendarPopup(True)
+            activity_date.setDate(date.today())
+            activity_amount = QLineEdit()
+            activity_amount.setObjectName("pensionActivityAmount")
+            activity_memo = QLineEdit()
+            activity_form.addRow("Pension", pension_account)
+            activity_form.addRow("Activity", activity_type)
+            activity_form.addRow("Date", activity_date)
+            activity_form.addRow("Amount", activity_amount)
+            activity_form.addRow("Memo", activity_memo)
+            layout.addLayout(activity_form)
+            totals_label = QLabel()
+            layout.addWidget(totals_label)
+            activity_table = QTableWidget(0, 4)
+            activity_table.setObjectName("pensionActivity")
+            activity_table.setHorizontalHeaderLabels(
+                ["Date", "Activity", "Memo", "Amount"]
+            )
+            activity_table.horizontalHeader().setStretchLastSection(True)
+            activity_table.setSelectionBehavior(QTableWidget.SelectRows)
+            activity_table.setSelectionMode(QTableWidget.SingleSelection)
+            activity_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            layout.addWidget(activity_table)
+            activity_buttons = QHBoxLayout()
+            add_activity_button = QPushButton("Add pension activity")
+            add_activity_button.setObjectName("addPensionActivity")
+            delete_activity_button = QPushButton("Delete selected activity")
+            activity_buttons.addWidget(add_activity_button)
+            activity_buttons.addWidget(delete_activity_button)
+            layout.addLayout(activity_buttons)
+
+            def refresh_activity():
+                with self.session_factory() as session:
+                    service = AccountService(session)
+                    pensions = [
+                        a for a in service.list_accounts()
+                        if a.account_type == AccountType.PENSION.value
+                    ]
+                    current = pension_account.currentData()
+                    pension_account.blockSignals(True)
+                    pension_account.clear()
+                    totals = {}
+                    for item in pensions:
+                        suffix = "" if item.is_active else " - archived"
+                        pension_account.addItem(
+                            f"{item.name} ({item.currency}){suffix}", item.id
+                        )
+                        if item.is_active:
+                            totals[item.currency] = (
+                                totals.get(item.currency, 0) + service.balance(item.id)
+                            )
+                    index = pension_account.findData(current)
+                    if index >= 0:
+                        pension_account.setCurrentIndex(index)
+                    pension_account.blockSignals(False)
+                    totals_label.setText(
+                        "Active pension totals: " + (
+                            ", ".join(
+                                f"{cur} {from_minor_units(value):,.2f}"
+                                for cur, value in sorted(totals.items())
+                            ) or "None"
+                        )
+                    )
+                    account_id = pension_account.currentData()
+                    txs = (
+                        TransactionService(session).list_transactions(account_id)
+                        if account_id is not None else []
+                    )
+                    activity_table.setRowCount(len(txs))
+                    for row, tx in enumerate(txs):
+                        for col, value in enumerate((
+                            tx.transaction_date.isoformat(), tx.transaction_type,
+                            tx.memo or tx.payee_text,
+                            str(from_minor_units(tx.signed_amount_minor)),
+                        )):
+                            cell = QTableWidgetItem(str(value))
+                            cell.setData(Qt.UserRole, tx.id)
+                            activity_table.setItem(row, col, cell)
+
+            def add_activity():
+                try:
+                    with self.session_factory() as session:
+                        PensionService(session).add_activity(
+                            pension_account.currentData(),
+                            activity_date.date().toPython(),
+                            activity_amount.text(), activity_type.currentText(),
+                            activity_memo.text(),
+                        )
+                    activity_amount.clear()
+                    activity_memo.clear()
+                    status.setText("Pension activity saved.")
+                    refresh()
+                except Exception as exc:
+                    QMessageBox.warning(
+                        page, "Could not save pension activity", str(exc)
+                    )
+
+            def delete_activity():
+                row = activity_table.currentRow()
+                item = activity_table.item(row, 0) if row >= 0 else None
+                if item is None:
+                    return
+                tx_id = item.data(Qt.UserRole)
+                with self.session_factory() as session:
+                    tx = session.get(TransactionModel, tx_id)
+                    if tx is None:
+                        refresh()
+                        return
+                    text = (
+                        "Both sides of this transfer will be deleted."
+                        if tx.transfer_id else "Delete the selected pension activity?"
+                    )
+                answer = QMessageBox.question(page, "Delete activity", text)
+                if answer != QMessageBox.Yes:
+                    return
+                try:
+                    with self.session_factory() as session:
+                        TransactionService(session).delete_transaction(tx_id)
+                    status.setText("Pension activity deleted.")
+                    refresh()
+                except Exception as exc:
+                    QMessageBox.warning(page, "Could not delete activity", str(exc))
+
+            pension_account.activated.connect(refresh_activity)
+            add_activity_button.clicked.connect(add_activity)
+            delete_activity_button.clicked.connect(delete_activity)
         page.refresh = refresh
         refresh()
+        if pension:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(page)
+            scroll.refresh = refresh
+            return scroll
         return page
 
     def transactions_page(self):
@@ -551,7 +720,10 @@ class FinanceMainWindow(QMainWindow):
 
         def refresh():
             with self.session_factory() as session:
-                accounts_list = AccountService(session).list_accounts()
+                accounts_list = [
+                    a for a in AccountService(session).list_accounts()
+                    if a.account_type != AccountType.PENSION.value
+                ]
                 categories_list = CategoryService(session).list_categories()
                 current_account = account.currentData()
                 account.clear()
@@ -571,8 +743,10 @@ class FinanceMainWindow(QMainWindow):
                     idx = category.findData(current_category)
                     if idx >= 0:
                         category.setCurrentIndex(idx)
-                txs = TransactionService(session).list_transactions(
-                    account_id=account.currentData(), search=search.text()
+                txs = (
+                    TransactionService(session).list_transactions(
+                        account_id=account.currentData(), search=search.text()
+                    ) if account.currentData() is not None else []
                 )
                 table.setRowCount(len(txs))
                 for row, tx in enumerate(txs):
@@ -758,7 +932,10 @@ class FinanceMainWindow(QMainWindow):
 
         def refresh():
             with self.session_factory() as session:
-                accounts_list = AccountService(session).list_accounts(active_only=True)
+                accounts_list = [
+                    a for a in AccountService(session).list_accounts(active_only=True)
+                    if a.account_type != AccountType.PENSION.value
+                ]
                 categories_list = CategoryService(session).list_categories()
                 schedules = ScheduledTransactionService(session).list_schedules()
 
@@ -1073,7 +1250,10 @@ class FinanceMainWindow(QMainWindow):
 
         def refresh():
             with self.session_factory() as session:
-                accounts_list = AccountService(session).list_accounts()
+                accounts_list = [
+                    a for a in AccountService(session).list_accounts()
+                    if a.account_type != AccountType.PENSION.value
+                ]
                 current = account.currentData()
                 account.blockSignals(True)
                 account.clear()
@@ -1151,6 +1331,10 @@ class FinanceMainWindow(QMainWindow):
             if not ok:
                 return
             account_id = int(selected.split(":", 1)[0])
+            pension_import = any(
+                a.id == account_id and a.account_type == AccountType.PENSION.value
+                for a in accounts
+            )
             preview = (
                 f"File: {filename}\nRecords: {len(records)}\n"
                 f"First date: {records[0]['date']}\n"
@@ -1165,7 +1349,9 @@ class FinanceMainWindow(QMainWindow):
                 self, "Import complete",
                 f"Imported: {result['imported']}\nSkipped duplicates: {result['skipped']}"
             )
-            self.show_page(self.transactions_page)
+            self.show_page(
+                self.pensions_page if pension_import else self.transactions_page
+            )
         except Exception as exc:
             QMessageBox.critical(self, "QIF import failed", str(exc))
 
@@ -1222,7 +1408,8 @@ class FinanceMainWindow(QMainWindow):
             QMessageBox.information(
                 self, "Import complete",
                 f"Imported: {imported}\nSkipped duplicates: {skipped}\n"
-                f"Skipped pending: {pending}"
+                f"Skipped pending: {pending}\n"
+                "Pension transactions appear in Pensions."
             )
             self.show_page(self.transactions_page)
         except Exception as exc:

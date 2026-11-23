@@ -36,6 +36,7 @@ small QWidget. UI event handlers call application services; they do not issue SQ
 
 Services coordinate use cases:
 - `AccountService`: create and list accounts.
+- `PensionService`: record contributions, withdrawals and valuation adjustments.
 - `CategoryService`: create and list categories.
 - `TransactionService`: post, list and search transactions.
 - `ScheduledTransactionService`: create monthly reminders, post due occurrences and
@@ -59,6 +60,8 @@ SQLAlchemy models, database session factory, repositories, QIF parser and CSV ex
 - The persisted `signed_amount_minor` is positive for income and negative for expense.
 - Transfer debit and credit entries have opposite signs and share a transfer identifier.
 - Transfers are excluded from income/expense totals.
+- Pension accounts and their transactions are excluded from income/expense reporting;
+  pension balances are displayed separately. Pension account types cannot be converted.
 - Split transactions are a future extension; do not approximate splits by duplicating
   the parent transaction.
 - Opening balance is stored on the account and is not an income/expense transaction.

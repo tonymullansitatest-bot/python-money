@@ -31,3 +31,6 @@ a negative amount to the source account and a positive amount to the destination
 
 Scheduled transactions are not included in balances or reports until manually posted.
 Posting creates a standard transaction and advances the reminder's due date atomically.
+Pension accounts use the same balance calculation. Pension contributions, withdrawals
+and valuation adjustments are stored as signed ledger entries, and all pension
+transactions are excluded from income/expense reports.

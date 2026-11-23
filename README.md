@@ -3,7 +3,8 @@
 A local-first Windows desktop personal finance application built with Python, PySide6,
 SQLAlchemy and SQLite. The initial MVP supports accounts, categories, payees,
 transactions, monthly scheduled-transaction reminders, account transfers, a dashboard,
-CSV export and QIF import.
+CSV export and QIF import. Pension accounts are managed separately from ordinary
+accounts and income/expense reporting.
 
 ## Status
 
@@ -65,6 +66,22 @@ ruff format .
    and are posted only when you select them.
 6. Use **Import QIF** to import an exported Microsoft Money account file.
 7. Review the dashboard and export transactions to CSV.
+
+## Pension accounts
+
+Use **Pensions** to create and manage pension accounts, view individual balances and
+active totals by currency, and record contributions, withdrawals, valuation gains and
+valuation losses. Enter positive amounts; the activity type determines the direction.
+Use **Transfers** when money moves between a pension and another account so both
+balances are updated without treating the movement as income or expense. Use a
+standalone contribution or withdrawal for activity outside the tracked accounts.
+To correct an activity, delete it and enter it again; deleting a transfer removes both
+legs. Archived pensions remain visible but cannot receive new activity.
+
+Pension balances and activity are excluded from the ordinary dashboard, income,
+expense and net savings reports, including imported pension transactions. Pension
+accounts cannot be converted to or from another account type. Valuation changes
+are manual adjustments, not automatic investment pricing or tax calculations.
 
 ## Scheduled transactions
 
