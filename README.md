@@ -121,6 +121,17 @@ account. The next due date advances one month; if a date falls beyond a month's 
 day, it uses that month's last day while retaining the original day for later months.
 Overdue months are posted one at a time. Reminders can be paused and resumed.
 
+For a scheduled transfer, choose the source and destination accounts and enter the
+amount in the source currency. Posting creates both transfer entries together and
+excludes them from income and expense reports. For different currencies, enter the
+exchange rate each time you post. Both accounts must be active. For a loan payment,
+schedule the principal as a transfer to the loan account and record interest and fees
+separately as expenses.
+
+Existing databases gain a scheduled-transfer table when the application starts.
+Backups created before this schema change cannot be restored directly into the updated
+database; keep them separately and create a fresh backup after upgrading.
+
 ## QIF import notes
 
 QIF is commonly exported one account at a time. Create or select the destination account

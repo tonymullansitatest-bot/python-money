@@ -219,6 +219,92 @@ def test_scheduled_transaction_pause_and_overdue_occurrences(session):
     assert schedule.next_due_date == date(2026, 3, 15)
 
 
+def test_scheduled_transfer_posts_linked_entries_and_advances(session):
+    accounts = AccountService(session)
+    source = accounts.create_account("Current", opening_balance="1000")
+    destination = accounts.create_account("Loan", AccountType.LOAN.value, "-5000")
+    schedules = ScheduledTransactionService(session)
+    schedule = schedules.create_schedule(
+        "Loan principal", source.id, "300", "Transfer", date(2026, 1, 31),
+        memo="Principal", destination_id=destination.id,
+    )
+    assert accounts.balance(source.id) == 100000
+    with pytest.raises(ValueError, match="not due"):
+        schedules.post_due(schedule.id, date(2026, 1, 30))
+    posted = schedules.post_due(schedule.id, date(2026, 1, 31))
+    rows = TransactionService(session).list_transactions()
+    assert len(rows) == 2
+    assert {row.transfer_id for row in rows} == {posted.transfer_id}
+    assert {row.signed_amount_minor for row in rows} == {-30000, 30000}
+    assert all(row.memo == "Principal" for row in rows)
+    assert (accounts.balance(source.id), accounts.balance(destination.id)) == (
+        70000, -470000
+    )
+    assert schedule.next_due_date == date(2026, 2, 28)
+    assert ReportService(session).income_expense(
+        date(2026, 1, 1), date(2026, 1, 31)
+    ) == {}
+    assert TransactionService(session).delete_transaction(posted.id) == 2
+
+
+def test_scheduled_transfer_validates_accounts_and_posting_rate(session):
+    accounts = AccountService(session)
+    source = accounts.create_account("Euro")
+    destination = accounts.create_account("Dollar", currency="USD")
+    schedules = ScheduledTransactionService(session)
+    for destination_id in (None, source.id, 99999):
+        with pytest.raises(ValueError):
+            schedules.create_schedule(
+                "Transfer", source.id, "100", "Transfer", date(2026, 1, 1),
+                destination_id=destination_id,
+            )
+    schedule = schedules.create_schedule(
+        "Transfer", source.id, "100", "Transfer", date(2026, 1, 1),
+        destination_id=destination.id,
+    )
+    with pytest.raises(ValueError, match="exchange rate"):
+        schedules.post_due(schedule.id, date(2026, 1, 1))
+    assert schedule.next_due_date == date(2026, 1, 1)
+    assert accounts.balance(source.id) == accounts.balance(destination.id) == 0
+    accounts.set_active(destination.id, False)
+    with pytest.raises(ValueError, match="Archived"):
+        schedules.post_due(schedule.id, date(2026, 1, 1), exchange_rate="1.2")
+    accounts.set_active(destination.id, True)
+    schedules.post_due(schedule.id, date(2026, 1, 1), exchange_rate="1.2")
+    assert (accounts.balance(source.id), accounts.balance(destination.id)) == (
+        -10000, 12000
+    )
+    schedules.post_due(schedule.id, date(2026, 2, 1), exchange_rate="1.1")
+    assert (accounts.balance(source.id), accounts.balance(destination.id)) == (
+        -20000, 23000
+    )
+
+
+def test_scheduled_transfer_failed_commit_rolls_back_both_legs_and_due_date(
+    session, monkeypatch
+):
+    accounts = AccountService(session)
+    source = accounts.create_account("Source")
+    destination = accounts.create_account("Destination")
+    schedules = ScheduledTransactionService(session)
+    schedule = schedules.create_schedule(
+        "Transfer", source.id, "100", "Transfer", date(2026, 1, 1),
+        destination_id=destination.id,
+    )
+    schedule_id = schedule.id
+
+    def fail_commit():
+        session.flush()
+        raise RuntimeError("Commit failed")
+
+    monkeypatch.setattr(session, "commit", fail_commit)
+    with pytest.raises(RuntimeError, match="Commit failed"):
+        schedules.post_due(schedule_id, date(2026, 1, 1))
+    assert session.get(type(schedule), schedule_id).next_due_date == date(2026, 1, 1)
+    assert TransactionService(session).list_transactions() == []
+    assert accounts.balance(source.id) == accounts.balance(destination.id) == 0
+
+
 def test_reports_group_by_currency_category_and_account(session):
     accounts = AccountService(session)
     eur = accounts.create_account("Euro", currency="EUR")

@@ -54,6 +54,7 @@ from finance_manager.infrastructure.csv_export import export_transactions_csv
 from finance_manager.infrastructure.models import (
     AccountModel,
     CategoryModel,
+    ScheduledTransactionModel,
     TransactionModel,
 )
 from finance_manager.infrastructure.qif import parse_qif
@@ -953,10 +954,16 @@ class FinanceMainWindow(QMainWindow):
 
         form = QFormLayout()
         name = QLineEdit()
+        name.setObjectName("scheduleName")
         account = QComboBox()
+        account.setObjectName("scheduleAccount")
+        destination = QComboBox()
+        destination.setObjectName("scheduleDestination")
         transaction_type = QComboBox()
-        transaction_type.addItems(["Expense", "Income"])
+        transaction_type.setObjectName("scheduleType")
+        transaction_type.addItems(["Expense", "Income", "Transfer"])
         amount = QLineEdit()
+        amount.setObjectName("scheduleAmount")
         due_date = QDateEdit()
         due_date.setCalendarPopup(True)
         due_date.setDate(date.today())
@@ -965,17 +972,22 @@ class FinanceMainWindow(QMainWindow):
         memo = QLineEdit()
         form.addRow("Reminder name", name)
         form.addRow("Account", account)
+        destination_label = QLabel("To account")
+        form.addRow(destination_label, destination)
         form.addRow("Type", transaction_type)
-        form.addRow("Amount", amount)
+        form.addRow("Amount (account currency)", amount)
         form.addRow("First due date", due_date)
-        form.addRow("Category", category)
-        form.addRow("Payee", payee)
+        category_label = QLabel("Category")
+        payee_label = QLabel("Payee")
+        form.addRow(category_label, category)
+        form.addRow(payee_label, payee)
         form.addRow("Memo", memo)
         layout.addLayout(form)
 
         status = self._named(QLabel(), "statusLabel")
         layout.addWidget(status)
         table = QTableWidget(0, 6)
+        table.setObjectName("scheduleTable")
         table.setHorizontalHeaderLabels([
             "Name", "Account", "Type", "Amount", "Next due", "Status"
         ])
@@ -987,6 +999,8 @@ class FinanceMainWindow(QMainWindow):
         action_row = QHBoxLayout()
         add_button = QPushButton("Add monthly reminder")
         post_button = QPushButton("Post due transaction")
+        add_button.setObjectName("addSchedule")
+        post_button.setObjectName("postSchedule")
         pause_button = QPushButton("Pause selected")
         post_button.setEnabled(False)
         pause_button.setEnabled(False)
@@ -999,22 +1013,31 @@ class FinanceMainWindow(QMainWindow):
 
         def refresh():
             with self.session_factory() as session:
-                accounts_list = [
-                    a for a in AccountService(session).list_accounts(active_only=True)
-                    if a.account_type != AccountType.PENSION.value
-                ]
+                accounts_list = AccountService(session).list_accounts(active_only=True)
                 categories_list = CategoryService(session).list_categories()
                 schedules = ScheduledTransactionService(session).list_schedules()
 
-            selected_account = account.currentData()
-            account.blockSignals(True)
-            account.clear()
-            for item in accounts_list:
-                account.addItem(f"{item.name} ({item.currency})", item.id)
-            selected_index = account.findData(selected_account)
-            if selected_index >= 0:
-                account.setCurrentIndex(selected_index)
-            account.blockSignals(False)
+            is_transfer = transaction_type.currentText() == "Transfer"
+            for widget in (destination_label, destination):
+                widget.setVisible(is_transfer)
+            for widget in (category_label, category, payee_label, payee):
+                widget.setVisible(not is_transfer)
+            for box in (account, destination):
+                selected_account = box.currentData()
+                box.blockSignals(True)
+                box.clear()
+                for item in accounts_list:
+                    if is_transfer or item.account_type != AccountType.PENSION.value:
+                        box.addItem(f"{item.name} ({item.currency})", item.id)
+                selected_index = box.findData(selected_account)
+                if selected_index >= 0:
+                    box.setCurrentIndex(selected_index)
+                box.blockSignals(False)
+            if (
+                destination.currentData() == account.currentData()
+                and destination.count() > 1
+            ):
+                destination.setCurrentIndex(1 if account.currentIndex() == 0 else 0)
 
             selected_category = category.currentData()
             category.clear()
@@ -1033,6 +1056,10 @@ class FinanceMainWindow(QMainWindow):
             table.setRowCount(len(schedules))
             for row, item in enumerate(schedules):
                 account_name = account_names.get(item.account_id, "Unavailable")
+                if item.transfer is not None:
+                    account_name += " -> " + account_names.get(
+                        item.transfer.destination_account_id, "Unavailable"
+                    )
                 if not item.is_active:
                     state = "Paused"
                 elif item.next_due_date <= today:
@@ -1077,15 +1104,19 @@ class FinanceMainWindow(QMainWindow):
                 if account.currentData() is None:
                     raise ValueError("Create an active account first")
                 with self.session_factory() as session:
+                    is_transfer = transaction_type.currentText() == "Transfer"
                     ScheduledTransactionService(session).create_schedule(
                         name.text(),
                         account.currentData(),
                         amount.text(),
                         transaction_type.currentText(),
                         due_date.date().toPython(),
-                        category.currentData(),
-                        payee.text(),
+                        None if is_transfer else category.currentData(),
+                        "" if is_transfer else payee.text(),
                         memo.text(),
+                        destination_id=(
+                            destination.currentData() if is_transfer else None
+                        ),
                     )
                 name.clear()
                 amount.clear()
@@ -1102,7 +1133,28 @@ class FinanceMainWindow(QMainWindow):
                 return
             try:
                 with self.session_factory() as session:
-                    ScheduledTransactionService(session).post_due(schedule_id)
+                    schedule = session.get(ScheduledTransactionModel, schedule_id)
+                    if schedule is None:
+                        raise ValueError("Scheduled transaction not found")
+                    rate = None
+                    if schedule.transfer is not None:
+                        source = session.get(AccountModel, schedule.account_id)
+                        target = session.get(
+                            AccountModel, schedule.transfer.destination_account_id
+                        )
+                        if source is not None and target is not None and (
+                            source.currency != target.currency
+                        ):
+                            rate, accepted = QInputDialog.getText(
+                                page, "Exchange rate",
+                                f"Enter {target.currency} units per 1 "
+                                f"{source.currency}:",
+                            )
+                            if not accepted:
+                                return
+                    ScheduledTransactionService(session).post_due(
+                        schedule_id, exchange_rate=rate
+                    )
                 status.setText("Scheduled transaction posted.")
                 refresh()
             except Exception as exc:
@@ -1129,6 +1181,7 @@ class FinanceMainWindow(QMainWindow):
         add_button.clicked.connect(add_schedule)
         post_button.clicked.connect(post_selected)
         pause_button.clicked.connect(toggle_pause)
+        transaction_type.currentTextChanged.connect(refresh)
         page.refresh = refresh
         refresh()
         return page

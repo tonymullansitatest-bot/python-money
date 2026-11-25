@@ -7,6 +7,7 @@
 - `payees`: transaction counterparties.
 - `transactions`: dated signed ledger entries, linked to accounts.
 - `scheduled_transactions`: monthly transaction templates with a next due date.
+- `scheduled_transfers`: destination accounts for scheduled transfer templates.
 - `import_batches`: provenance and summary of each import.
 - `transfers`: transfer grouping identifier is stored on both ledger entries.
 
@@ -30,7 +31,8 @@ posting; currencies with other minor-unit conventions need a currency metadata u
 a negative amount to the source account and a positive amount to the destination.
 
 Scheduled transactions are not included in balances or reports until manually posted.
-Posting creates a standard transaction and advances the reminder's due date atomically.
+Posting creates a standard transaction, or both linked transfer entries, and advances
+the reminder's due date atomically. Cross-currency transfer rates are supplied at posting.
 Pension accounts use the same balance calculation. Pension contributions, withdrawals
 and valuation adjustments are stored as signed ledger entries, and all pension
 transactions are excluded from income/expense reports.

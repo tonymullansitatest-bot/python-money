@@ -4,7 +4,10 @@ from contextlib import closing
 import pytest
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
-from finance_manager.application.services import AccountService
+from finance_manager.application.services import (
+    AccountService,
+    ScheduledTransactionService,
+)
 from finance_manager.infrastructure.backup import BackupError, BackupService
 from finance_manager.infrastructure.database import (
     build_engine,
@@ -31,6 +34,25 @@ def add_account(factory, name):
 def account_names(factory):
     with factory() as session:
         return [account.name for account in AccountService(session).list_accounts()]
+
+
+def test_existing_database_gains_transfer_table_without_losing_reminders(database):
+    from datetime import date
+
+    engine, factory = database
+    with factory() as session:
+        account = AccountService(session).create_account("Current")
+        ScheduledTransactionService(session).create_schedule(
+            "Bill", account.id, "10", "Expense", date(2026, 1, 1)
+        )
+    with engine.begin() as connection:
+        connection.exec_driver_sql("DROP TABLE scheduled_transfers")
+    initialize_database(engine)
+    with factory() as session:
+        schedules = ScheduledTransactionService(session).list_schedules()
+        assert len(schedules) == 1
+        assert schedules[0].name == "Bill"
+        assert schedules[0].transfer is None
 
 
 def test_backup_restore_and_safety_backup_include_wal_data(database, tmp_path):

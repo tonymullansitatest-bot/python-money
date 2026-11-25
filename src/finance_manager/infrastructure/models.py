@@ -117,3 +117,23 @@ class ScheduledTransactionModel(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc), nullable=False
     )
+    transfer: Mapped["ScheduledTransferModel | None"] = relationship(
+        back_populates="schedule", uselist=False, lazy="joined",
+        cascade="all, delete-orphan",
+    )
+
+
+class ScheduledTransferModel(Base):
+    """Destination account for a scheduled transfer."""
+
+    __tablename__ = "scheduled_transfers"
+
+    schedule_id: Mapped[int] = mapped_column(
+        ForeignKey("scheduled_transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    destination_account_id: Mapped[int] = mapped_column(
+        ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    schedule: Mapped["ScheduledTransactionModel"] = relationship(
+        back_populates="transfer"
+    )

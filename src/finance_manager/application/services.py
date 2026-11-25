@@ -15,6 +15,7 @@ from finance_manager.infrastructure.models import (
     CategoryModel,
     ImportBatchModel,
     ScheduledTransactionModel,
+    ScheduledTransferModel,
     TransactionModel,
 )
 from finance_manager.infrastructure.repositories import (
@@ -307,14 +308,7 @@ class TransferService:
         """Convert minor units at rate, rounding half up to the nearest cent."""
         return int((Decimal(minor) * rate).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
-    def create_transfer(self, source_id: int, destination_id: int, amount,
-                        tx_date: date, memo="", exchange_rate=None):
-        """Move funds between accounts.
-
-        amount is in the source currency. For cross-currency transfers,
-        exchange_rate is the number of destination-currency units per one
-        source-currency unit.
-        """
+    def _accounts(self, source_id, destination_id):
         if source_id == destination_id:
             raise ValueError("Source and destination accounts must differ")
         source = self.accounts.get(source_id)
@@ -323,6 +317,11 @@ class TransferService:
             raise ValueError("Both accounts must exist")
         if not (source.is_active and destination.is_active):
             raise ValueError("Archived accounts cannot be used in transfers")
+        return source, destination
+
+    def _add_transfer(self, source_id, destination_id, amount, tx_date, memo="",
+                      exchange_rate=None):
+        source, destination = self._accounts(source_id, destination_id)
         minor = to_minor_units(amount)
         if minor <= 0:
             raise ValueError("Transfer amount must be greater than zero")
@@ -335,50 +334,66 @@ class TransferService:
             memo = (f"{memo} ".lstrip() +
                     f"[1 {source.currency} = {rate.normalize():f} {destination.currency}]")
         transfer_id = str(uuid4())
+        debit = TransactionModel(
+            account_id=source_id, transaction_date=tx_date,
+            signed_amount_minor=-minor, transaction_type="Transfer",
+            payee_text=f"Transfer to {destination.name}", memo=memo,
+            transfer_id=transfer_id
+        )
+        credit = TransactionModel(
+            account_id=destination_id, transaction_date=tx_date,
+            signed_amount_minor=destination_minor, transaction_type="Transfer",
+            payee_text=f"Transfer from {source.name}", memo=memo,
+            transfer_id=transfer_id
+        )
+        self.session.add_all([debit, credit])
+        return debit
+
+    def create_transfer(self, source_id: int, destination_id: int, amount,
+                        tx_date: date, memo="", exchange_rate=None):
+        """Move funds between accounts; rate is destination units per source unit."""
         try:
-            self.session.add_all([
-                TransactionModel(
-                    account_id=source_id, transaction_date=tx_date,
-                    signed_amount_minor=-minor, transaction_type="Transfer",
-                    payee_text=f"Transfer to {destination.name}", memo=memo,
-                    transfer_id=transfer_id
-                ),
-                TransactionModel(
-                    account_id=destination_id, transaction_date=tx_date,
-                    signed_amount_minor=destination_minor, transaction_type="Transfer",
-                    payee_text=f"Transfer from {source.name}", memo=memo,
-                    transfer_id=transfer_id
-                )
-            ])
+            debit = self._add_transfer(
+                source_id, destination_id, amount, tx_date, memo, exchange_rate
+            )
             self.session.commit()
         except Exception:
             self.session.rollback()
             raise
-        return transfer_id
+        return debit.transfer_id
 
 
 class ScheduledTransactionService:
-    """Manage recurring income and expense transactions."""
+    """Manage recurring income, expense, and transfer reminders."""
 
     def __init__(self, session):
         self.session = session
 
     def create_schedule(self, name, account_id, amount, transaction_type, due_date,
-                        category_id=None, payee="", memo=""):
+                        category_id=None, payee="", memo="", destination_id=None):
         """Validate and persist a recurring transaction schedule."""
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Schedule name is required")
         if transaction_type not in (
-            TransactionType.INCOME.value, TransactionType.EXPENSE.value
+            TransactionType.INCOME.value, TransactionType.EXPENSE.value,
+            TransactionType.TRANSFER.value,
         ):
-            raise ValueError("Transaction type must be Income or Expense")
+            raise ValueError("Transaction type must be Income, Expense or Transfer")
         account = self.session.get(AccountModel, account_id)
         if account is None or not account.is_active:
             raise ValueError("An active account is required")
         amount_minor = to_minor_units(amount)
         if amount_minor <= 0:
             raise ValueError("Amount must be greater than zero")
+        if transaction_type == TransactionType.TRANSFER.value:
+            if destination_id is None:
+                raise ValueError("A destination account is required")
+            TransferService(self.session)._accounts(account_id, destination_id)
+            if category_id is not None or payee.strip():
+                raise ValueError("Transfers cannot have a category or payee")
+        elif destination_id is not None:
+            raise ValueError("Destination is only valid for a transfer")
         if (
             category_id is not None
             and self.session.get(CategoryModel, category_id) is None
@@ -396,6 +411,10 @@ class ScheduledTransactionService:
             next_due_date=due_date,
             due_day=due_date.day,
         )
+        if transaction_type == TransactionType.TRANSFER.value:
+            schedule.transfer = ScheduledTransferModel(
+                destination_account_id=destination_id
+            )
         self.session.add(schedule)
         self.session.commit()
         return schedule
@@ -434,7 +453,7 @@ class ScheduledTransactionService:
         self.session.commit()
         return schedule
 
-    def post_due(self, schedule_id, as_of=None):
+    def post_due(self, schedule_id, as_of=None, exchange_rate=None):
         """Post one due occurrence and advance its schedule by one month."""
         as_of = as_of or date.today()
         schedule = self.session.get(ScheduledTransactionModel, schedule_id)
@@ -448,31 +467,39 @@ class ScheduledTransactionService:
         account = self.session.get(AccountModel, schedule.account_id)
         if account is None or not account.is_active:
             raise ValueError("The scheduled account is not active")
-        signed_amount = (
-            schedule.amount_minor
-            if schedule.transaction_type == TransactionType.INCOME.value
-            else -schedule.amount_minor
-        )
-        transaction = TransactionModel(
-            account_id=schedule.account_id,
-            transaction_date=schedule.next_due_date,
-            signed_amount_minor=signed_amount,
-            transaction_type=schedule.transaction_type,
-            payee_text=schedule.payee_text or schedule.name,
-            memo=schedule.memo,
-            category_id=schedule.category_id,
-        )
-
-        next_month = schedule.next_due_date.month % 12 + 1
-        next_year = schedule.next_due_date.year
-        if schedule.next_due_date.month == 12:
-            next_year += 1
-        next_day = min(
-            schedule.due_day, calendar.monthrange(next_year, next_month)[1]
-        )
-        schedule.next_due_date = date(next_year, next_month, next_day)
-        self.session.add(transaction)
         try:
+            if schedule.transaction_type == TransactionType.TRANSFER.value:
+                if schedule.transfer is None:
+                    raise ValueError("Scheduled transfer has no destination")
+                transaction = TransferService(self.session)._add_transfer(
+                    schedule.account_id, schedule.transfer.destination_account_id,
+                    Decimal(schedule.amount_minor) / 100, schedule.next_due_date,
+                    schedule.memo, exchange_rate,
+                )
+            else:
+                signed_amount = (
+                    schedule.amount_minor
+                    if schedule.transaction_type == TransactionType.INCOME.value
+                    else -schedule.amount_minor
+                )
+                transaction = TransactionModel(
+                    account_id=schedule.account_id,
+                    transaction_date=schedule.next_due_date,
+                    signed_amount_minor=signed_amount,
+                    transaction_type=schedule.transaction_type,
+                    payee_text=schedule.payee_text or schedule.name,
+                    memo=schedule.memo,
+                    category_id=schedule.category_id,
+                )
+                self.session.add(transaction)
+            next_month = schedule.next_due_date.month % 12 + 1
+            next_year = schedule.next_due_date.year
+            if schedule.next_due_date.month == 12:
+                next_year += 1
+            next_day = min(
+                schedule.due_day, calendar.monthrange(next_year, next_month)[1]
+            )
+            schedule.next_due_date = date(next_year, next_month, next_day)
             self.session.commit()
         except Exception:
             self.session.rollback()

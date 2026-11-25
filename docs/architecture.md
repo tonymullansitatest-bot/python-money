@@ -67,8 +67,9 @@ it has no database access or tools for changing records.
 - Split transactions are a future extension; do not approximate splits by duplicating
   the parent transaction.
 - Opening balance is stored on the account and is not an income/expense transaction.
-- Scheduled transactions are reminders; posting one creates a normal income/expense
-  transaction and advances the next due date in the same commit.
+- Scheduled transactions are reminders; posting one creates an income/expense
+  transaction or linked transfer entries and advances the next due date in the same
+  commit.
 
 ## Microsoft Money Plus Sunset migration
 
