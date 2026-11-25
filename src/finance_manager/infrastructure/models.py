@@ -7,6 +7,8 @@ from finance_manager.infrastructure.database import Base
 
 
 class AccountModel(Base):
+    """A financial account and its opening balance and settings."""
+
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -24,6 +26,8 @@ class AccountModel(Base):
 
 
 class CategoryModel(Base):
+    """A transaction category that may be nested under a parent category."""
+
     __tablename__ = "categories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -40,6 +44,8 @@ class CategoryModel(Base):
 
 
 class PayeeModel(Base):
+    """A reusable payee name."""
+
     __tablename__ = "payees"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -47,6 +53,8 @@ class PayeeModel(Base):
 
 
 class ImportBatchModel(Base):
+    """Metadata and counts for a file import operation."""
+
     __tablename__ = "import_batches"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -59,6 +67,8 @@ class ImportBatchModel(Base):
 
 
 class TransactionModel(Base):
+    """A posted transaction associated with an account."""
+
     __tablename__ = "transactions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     account_id: Mapped[int] = mapped_column(
@@ -85,6 +95,8 @@ class TransactionModel(Base):
 
 
 class ScheduledTransactionModel(Base):
+    """A recurring transaction template with its next due date."""
+
     __tablename__ = "scheduled_transactions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

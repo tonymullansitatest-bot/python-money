@@ -1,3 +1,5 @@
+"""Application services for accounts, transactions, imports, and reports."""
+
 import calendar
 import hashlib
 from datetime import date
@@ -24,12 +26,15 @@ from finance_manager.infrastructure.repositories import (
 
 
 class AccountService:
+    """Manage account creation, updates, archiving, and balances."""
+
     def __init__(self, session):
         self.session = session
         self.repo = AccountRepository(session)
 
     def create_account(self, name, account_type=AccountType.CURRENT.value,
                        opening_balance="0.00", currency="EUR"):
+        """Validate, persist, and return a new account."""
         if not name.strip():
             raise ValueError("Account name is required")
         if account_type not in [t.value for t in AccountType]:
@@ -45,6 +50,7 @@ class AccountService:
         return account
 
     def list_accounts(self, active_only=False):
+        """Return accounts, optionally limited to active accounts."""
         accounts = self.repo.list()
         return [a for a in accounts if a.is_active] if active_only else accounts
 
@@ -114,11 +120,14 @@ class AccountService:
 
 
 class CategoryService:
+    """Manage income and expense categories."""
+
     def __init__(self, session):
         self.session = session
         self.repo = CategoryRepository(session)
 
     def create_category(self, name, kind="Expense", parent_id=None):
+        """Validate, persist, and return a new category."""
         if kind not in ("Income", "Expense"):
             raise ValueError("Category kind must be Income or Expense")
         if not name.strip():
@@ -133,10 +142,13 @@ class CategoryService:
 
 
 class PensionService:
+    """Record contributions, withdrawals, and valuation changes."""
+
     def __init__(self, session):
         self.session = session
 
     def add_activity(self, account_id, tx_date, amount, activity, memo=""):
+        """Add a signed activity to an active pension account."""
         account = self.session.get(AccountModel, account_id)
         if account is None or account.account_type != AccountType.PENSION.value:
             raise ValueError("A pension account is required")
@@ -166,6 +178,8 @@ class PensionService:
 
 
 class TransactionService:
+    """Create and manage income and expense ledger transactions."""
+
     def __init__(self, session):
         self.session = session
         self.accounts = AccountRepository(session)
@@ -176,6 +190,7 @@ class TransactionService:
     def add_transaction(self, account_id: int, tx_date: date, amount,
                         transaction_type: str, payee="", memo="",
                         category_id=None, reference=""):
+        """Validate and persist an income or expense transaction."""
         if transaction_type not in (TransactionType.INCOME.value, TransactionType.EXPENSE.value):
             raise ValueError("Use TransferService to create transfers")
         account = self.accounts.get(account_id)
@@ -204,6 +219,7 @@ class TransactionService:
         return tx
 
     def list_transactions(self, account_id=None, search=""):
+        """Return transactions matching the optional account and search filters."""
         return self.transactions.list(account_id, search)
 
     def update_transaction(self, transaction_id: int, account_id: int, tx_date: date,
@@ -269,12 +285,15 @@ class TransactionService:
 
 
 class TransferService:
+    """Create paired ledger entries for transfers between accounts."""
+
     def __init__(self, session):
         self.session = session
         self.accounts = AccountRepository(session)
 
     @staticmethod
     def _parse_rate(value) -> Decimal:
+        """Parse and validate a positive exchange rate."""
         try:
             rate = Decimal(str(value).strip())
         except (InvalidOperation, ValueError, TypeError) as exc:
@@ -339,11 +358,14 @@ class TransferService:
 
 
 class ScheduledTransactionService:
+    """Manage recurring income and expense transactions."""
+
     def __init__(self, session):
         self.session = session
 
     def create_schedule(self, name, account_id, amount, transaction_type, due_date,
                         category_id=None, payee="", memo=""):
+        """Validate and persist a recurring transaction schedule."""
         clean_name = name.strip()
         if not clean_name:
             raise ValueError("Schedule name is required")
@@ -379,6 +401,7 @@ class ScheduledTransactionService:
         return schedule
 
     def list_schedules(self, active_only=False):
+        """Return schedules ordered by due date and name."""
         stmt = select(ScheduledTransactionModel).order_by(
             ScheduledTransactionModel.next_due_date,
             ScheduledTransactionModel.name,
@@ -388,6 +411,7 @@ class ScheduledTransactionService:
         return list(self.session.scalars(stmt))
 
     def due_schedules(self, as_of=None):
+        """Return active schedules due on or before the specified date."""
         as_of = as_of or date.today()
         stmt = (
             select(ScheduledTransactionModel)
@@ -411,6 +435,7 @@ class ScheduledTransactionService:
         return schedule
 
     def post_due(self, schedule_id, as_of=None):
+        """Post one due occurrence and advance its schedule by one month."""
         as_of = as_of or date.today()
         schedule = self.session.get(ScheduledTransactionModel, schedule_id)
         if schedule is None:
@@ -456,6 +481,8 @@ class ScheduledTransactionService:
 
 
 class ReportService:
+    """Generate income, expense, category, and transaction reports."""
+
     def __init__(self, session):
         self.session = session
 
@@ -550,10 +577,13 @@ class ReportService:
 
 
 class ImportService:
+    """Import external statement records into the transaction ledger."""
+
     def __init__(self, session):
         self.session = session
 
     def commit_qif(self, filename: str, account_id: int, records: list[dict]):
+        """Persist QIF records while skipping duplicate transactions."""
         account = AccountRepository(self.session).get(account_id)
         if account is None:
             raise ValueError("Destination account not found")

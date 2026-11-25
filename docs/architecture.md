@@ -84,13 +84,16 @@ write back to it.
 
 The database currently uses the operating-system user profile directory and SQLite.
 This is not database encryption. Restrict access through Windows account permissions,
-use full-disk encryption, and make backups before importing. Encryption at application
-level and a tested backup/restore workflow are future release requirements.
+use full-disk encryption, and make backups before importing. Manual backup uses SQLite's
+online backup API. Restore validates a snapshot, checks schema compatibility, and creates
+a safety backup before replacing the current database. Close other application instances
+before restoring. Backups are unencrypted. Application-level encryption remains a future
+release requirement.
 
 ## Suggested next architectural increments
 
 1. Alembic-managed migrations (initial scaffold uses `create_all` for first-run ease).
 2. Split transactions and reconciliation workflow.
 3. Configurable CSV import mapping and OFX/QFX.
-4. Backup/restore and audit log.
+4. Audit log.
 5. Native MNY compatibility investigation.

@@ -1,6 +1,8 @@
 import csv
-from datetime import date
+import sqlite3
+from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 
 from PySide6.QtCharts import (
     QBarCategoryAxis,
@@ -47,6 +49,7 @@ from finance_manager.application.services import (
 )
 from finance_manager.domain.enums import AccountType
 from finance_manager.domain.money import from_minor_units, to_minor_units
+from finance_manager.infrastructure.backup import BackupError, BackupService
 from finance_manager.infrastructure.csv_export import export_transactions_csv
 from finance_manager.infrastructure.models import (
     AccountModel,
@@ -128,6 +131,12 @@ class FinanceMainWindow(QMainWindow):
         revolut_button = QPushButton("Import Revolut CSV")
         revolut_button.clicked.connect(self.import_revolut)
         nav.addWidget(revolut_button)
+        backup_button = QPushButton("Back up database")
+        backup_button.clicked.connect(self.backup_database)
+        nav.addWidget(backup_button)
+        restore_button = QPushButton("Restore database")
+        restore_button.clicked.connect(self.restore_database)
+        nav.addWidget(restore_button)
 
         self.pages = {}
         self.show_page(self.dashboard_page)
@@ -152,6 +161,59 @@ class FinanceMainWindow(QMainWindow):
 
     def ai_page(self):
         return AIPage()
+
+    def backup_database(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Back up database",
+            f"finance-backup-{datetime.now():%Y%m%d-%H%M%S}.db",
+            "SQLite database (*.db)",
+            options=QFileDialog.DontConfirmOverwrite,
+        )
+        if not filename:
+            return
+        try:
+            BackupService(self.session_factory.kw["bind"]).create_backup(Path(filename))
+        except (BackupError, OSError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Backup failed", str(exc))
+            return
+        QMessageBox.information(
+            self, "Backup complete", f"Backup saved to:\n{filename}"
+        )
+
+    def restore_database(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Restore database", "", "SQLite database (*.db *.sqlite *.sqlite3)"
+        )
+        if not filename:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Confirm restore",
+            "Restore will replace all current financial data and discard unfinished "
+            "forms. A safety backup will be created first. Close other application "
+            "instances before continuing.\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            safety = BackupService(self.session_factory.kw["bind"]).restore(
+                Path(filename)
+            )
+        except (BackupError, OSError, sqlite3.Error) as exc:
+            QMessageBox.critical(self, "Restore failed", str(exc))
+            return
+        for key, page in list(self.pages.items()):
+            if key != "ai_page":
+                self.stack.removeWidget(page)
+                page.deleteLater()
+                del self.pages[key]
+        self.show_page(self.dashboard_page)
+        QMessageBox.information(
+            self, "Restore complete", f"Safety backup saved to:\n{safety}"
+        )
 
     def dashboard_page(self):
         """Build the dashboard: overview, monthly chart, spending pie and balances."""

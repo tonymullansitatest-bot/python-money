@@ -48,6 +48,20 @@ python -m finance_manager.main
 The database is created in the user's application data directory, not inside the
 source repository. On Windows this is normally `%LOCALAPPDATA%\PersonalFinanceManager`.
 
+## Backup and restore
+
+Use **Back up database** to save a consistent SQLite snapshot to a new file. Choose a
+secure location, preferably on a separate device; backups contain unencrypted financial
+data. Existing files are never overwritten.
+
+To restore, close other instances of the application and select **Restore database**.
+After confirmation, the selected backup replaces all current financial data and any
+unfinished forms are discarded. The app checks database integrity, references and
+schema compatibility first, and saves a uniquely named `pre-restore` safety backup in
+the database directory before replacing data. Backups must match the current database
+schema; a backup from a different version may not be compatible. Backups do not include
+application preferences such as the theme. Test your backups periodically.
+
 ## Tests and quality
 
 ```powershell
