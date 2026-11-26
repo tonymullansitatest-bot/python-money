@@ -223,6 +223,10 @@ class TransactionService:
         """Return transactions matching the optional account and search filters."""
         return self.transactions.list(account_id, search)
 
+    def list_payees(self):
+        """Return saved and historical payee names for transaction entry."""
+        return self.payees.list_names()
+
     def update_transaction(self, transaction_id: int, account_id: int, tx_date: date,
                            amount, transaction_type: str, payee="", memo="",
                            category_id=None):
@@ -481,6 +485,9 @@ class ScheduledTransactionService:
                     schedule.amount_minor
                     if schedule.transaction_type == TransactionType.INCOME.value
                     else -schedule.amount_minor
+                )
+                PayeeRepository(self.session).get_or_create(
+                    schedule.payee_text or schedule.name
                 )
                 transaction = TransactionModel(
                     account_id=schedule.account_id,

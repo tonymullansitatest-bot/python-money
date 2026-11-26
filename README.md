@@ -81,6 +81,10 @@ ruff format .
 6. Use **Import QIF** to import an exported Microsoft Money account file.
 7. Review the dashboard and export transactions to CSV.
 
+When entering or editing a transaction, start typing a payee to see suggestions from
+saved and previously recorded payees. New payees are saved with the transaction and
+remain available even if it is later deleted. Suggestions are local to the database.
+
 ## Pension accounts
 
 Use **Pensions** to create and manage pension accounts, view individual balances and
@@ -139,9 +143,9 @@ before importing. The importer supports common bank-style records (`D`, `T`, `P`
 `L`, `N`, `C`) and common date formats. QIF variants differ; inspect the preview and
 reconcile account balances and transaction counts after each import.
 
-The first implementation intentionally does not silently create categories or payees
-during import. Unknown categories are retained as text in the import preview and mapped
-to a default "Uncategorised" category when committed. Review imported data carefully.
+Imported payees are saved for transaction suggestions. Unknown categories are retained
+as text in the import preview and mapped to a default "Uncategorised" category when
+committed. Review imported data carefully.
 
 ## Financial correctness
 

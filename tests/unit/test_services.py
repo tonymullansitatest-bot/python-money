@@ -13,6 +13,9 @@ from finance_manager.application.services import (
     TransferService,
 )
 from finance_manager.domain.enums import AccountType
+from finance_manager.infrastructure.database import build_session_factory
+from finance_manager.infrastructure.models import TransactionModel
+from finance_manager.infrastructure.repositories import PayeeRepository
 
 
 def test_income_expense_and_balance(session):
@@ -27,6 +30,40 @@ def test_income_expense_and_balance(session):
     assert report == {
         "EUR": {"income_minor": 25000, "expenses_minor": 4000, "net_minor": 21000}
     }
+
+
+def test_payee_suggestions_include_legacy_transactions_and_persist_scheduled_payees(
+    session,
+):
+    account = AccountService(session).create_account("Current")
+    transactions = TransactionService(session)
+    tx = transactions.add_transaction(
+        account.id, date.today(), "1", "Expense", "  Shop  "
+    )
+    transactions.add_transaction(account.id, date.today(), "1", "Expense", "shop")
+    session.add(TransactionModel(
+        account_id=account.id, transaction_date=date.today(),
+        signed_amount_minor=-100, transaction_type="Expense", payee_text=" Legacy ",
+    ))
+    session.add(TransactionModel(
+        account_id=account.id, transaction_date=date.today(),
+        signed_amount_minor=-100, transaction_type="Transfer",
+        payee_text="Transfer to B",
+    ))
+    session.commit()
+    schedules = ScheduledTransactionService(session)
+    schedule = schedules.create_schedule(
+        "Bill", account.id, "1", "Expense", date.today(), payee="Power"
+    )
+    posted = schedules.post_due(schedule.id, date.today())
+    transactions.delete_transaction(tx.id)
+    transactions.delete_transaction(posted.id)
+
+    factory = build_session_factory(session.get_bind())
+    with factory() as fresh_session:
+        assert PayeeRepository(fresh_session).list_names() == [
+            "Legacy", "Power", "Shop"
+        ]
 
 
 def test_transfer_is_balanced_and_not_income_expense(session):

@@ -55,6 +55,28 @@ class PayeeRepository:
     def __init__(self, session: Session):
         self.session = session
 
+    def list_names(self) -> list[str]:
+        names = {}
+        saved = self.session.scalars(select(PayeeModel.name).order_by(PayeeModel.id))
+        for name in saved:
+            clean = name.strip()
+            if clean:
+                names.setdefault(clean.casefold(), clean)
+        historical = self.session.scalars(
+            select(TransactionModel.payee_text)
+            .where(
+                TransactionModel.transaction_type.in_(("Income", "Expense")),
+                TransactionModel.transfer_id.is_(None),
+            )
+            .distinct()
+            .order_by(TransactionModel.payee_text)
+        )
+        for name in historical:
+            clean = name.strip()
+            if clean:
+                names.setdefault(clean.casefold(), clean)
+        return sorted(names.values(), key=str.casefold)
+
     def get_or_create(self, name: str):
         clean = (name or "").strip()
         if not clean:

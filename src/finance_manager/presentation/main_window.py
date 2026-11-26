@@ -13,10 +13,11 @@ from PySide6.QtCharts import (
     QPieSeries,
     QValueAxis,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QStringListModel, Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QComboBox,
+    QCompleter,
     QDateEdit,
     QFileDialog,
     QFormLayout,
@@ -752,7 +753,13 @@ class FinanceMainWindow(QMainWindow):
         tx_date.setCalendarPopup(True)
         tx_date.setDate(date.today())
         amount = QLineEdit()
+        amount.setObjectName("transactionAmount")
         payee = QLineEdit()
+        payee.setObjectName("transactionPayee")
+        payee_model = QStringListModel(payee)
+        completer = QCompleter(payee_model, payee)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        payee.setCompleter(completer)
         memo = QLineEdit()
         category = QComboBox()
         form.addRow("Account", account)
@@ -793,6 +800,7 @@ class FinanceMainWindow(QMainWindow):
                     if a.account_type != AccountType.PENSION.value
                 ]
                 categories_list = CategoryService(session).list_categories()
+                payee_model.setStringList(TransactionService(session).list_payees())
                 current_account = account.currentData()
                 account.clear()
                 for a in accounts_list:
@@ -925,6 +933,7 @@ class FinanceMainWindow(QMainWindow):
                 QMessageBox.warning(page, "Could not save transaction", str(exc))
 
         button = QPushButton("Add transaction")
+        button.setObjectName("addTransaction")
         button.clicked.connect(add)
         cancel_button = QPushButton("Cancel edit")
         cancel_button.setVisible(False)
