@@ -132,6 +132,16 @@ exchange rate each time you post. Both accounts must be active. For a loan payme
 schedule the principal as a transfer to the loan account and record interest and fees
 separately as expenses.
 
+The Dashboard's **Account balances** table also shows a dated two-week forecast.
+This adds every unposted occurrence of active scheduled income, expenses and
+same-currency transfers due through 14 days from today, including overdue months,
+to the current ledger balance. Both transfer legs are included, even when the other
+account is a pension. Paused reminders and activity involving inactive accounts are
+excluded. Cross-currency scheduled transfers are excluded from both accounts with a
+visible forecast warning because their exchange rate is only entered when posting.
+Forecasts are estimates only: they do not post transactions or advance reminder dates,
+and are independent of the Dashboard's reporting period and currency filters.
+
 Existing databases gain a scheduled-transfer table when the application starts.
 Backups created before this schema change cannot be restored directly into the updated
 database; keep them separately and create a fresh backup after upgrading.

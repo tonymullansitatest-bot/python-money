@@ -457,6 +457,58 @@ class ScheduledTransactionService:
         self.session.commit()
         return schedule
 
+    @staticmethod
+    def _next_due_date(due_date: date, due_day: int) -> date:
+        month = due_date.month % 12 + 1
+        year = due_date.year + (due_date.month == 12)
+        day = min(due_day, calendar.monthrange(year, month)[1])
+        return date(year, month, day)
+
+    def forecast_balances(self, through: date) -> tuple[dict[int, int], list[str]]:
+        """Project active balances through a date without posting due occurrences."""
+        accounts = {
+            account.id: account
+            for account in AccountService(self.session).list_accounts(active_only=True)
+        }
+        balances = {
+            account_id: AccountService(self.session).balance(account_id)
+            for account_id in accounts
+        }
+        warnings = []
+        for schedule in self.due_schedules(through):
+            source = accounts.get(schedule.account_id)
+            destination = None
+            if source is None:
+                warnings.append(f"{schedule.name}: excluded (source account inactive).")
+                continue
+            if schedule.transaction_type == TransactionType.TRANSFER.value:
+                if schedule.transfer is None:
+                    raise ValueError("Scheduled transfer has no destination")
+                destination = accounts.get(schedule.transfer.destination_account_id)
+                if destination is None:
+                    warnings.append(
+                        f"{schedule.name}: excluded (destination account inactive)."
+                    )
+                    continue
+                if source.currency != destination.currency:
+                    warnings.append(
+                        f"{schedule.name}: cross-currency transfer excluded "
+                        "(exchange rate required)."
+                    )
+                    continue
+            due_date = schedule.next_due_date
+            while due_date <= through:
+                amount = schedule.amount_minor
+                if schedule.transaction_type != TransactionType.INCOME.value:
+                    amount = -amount
+                balances[source.id] += amount
+                if destination is not None:
+                    balances[destination.id] -= amount
+                if (due_date.year, due_date.month) == (through.year, through.month):
+                    break
+                due_date = self._next_due_date(due_date, schedule.due_day)
+        return balances, warnings
+
     def post_due(self, schedule_id, as_of=None, exchange_rate=None):
         """Post one due occurrence and advance its schedule by one month."""
         as_of = as_of or date.today()
@@ -499,14 +551,9 @@ class ScheduledTransactionService:
                     category_id=schedule.category_id,
                 )
                 self.session.add(transaction)
-            next_month = schedule.next_due_date.month % 12 + 1
-            next_year = schedule.next_due_date.year
-            if schedule.next_due_date.month == 12:
-                next_year += 1
-            next_day = min(
-                schedule.due_day, calendar.monthrange(next_year, next_month)[1]
+            schedule.next_due_date = self._next_due_date(
+                schedule.next_due_date, schedule.due_day
             )
-            schedule.next_due_date = date(next_year, next_month, next_day)
             self.session.commit()
         except Exception:
             self.session.rollback()

@@ -1,6 +1,6 @@
 import csv
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -267,12 +267,16 @@ class FinanceMainWindow(QMainWindow):
         layout.addLayout(charts, 1)
 
         layout.addWidget(self._named(QLabel("Account balances"), "sectionLabel"))
-        table = QTableWidget(0, 3)
-        table.setHorizontalHeaderLabels(["Account", "Type", "Balance"])
+        table = QTableWidget(0, 4)
+        table.setObjectName("dashboardBalances")
+        table.setHorizontalHeaderLabels(["Account", "Type", "Balance", "Forecast"])
         table.horizontalHeader().setStretchLastSection(True)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.setMaximumHeight(150)
         layout.addWidget(table)
+        forecast_note = self._named(QLabel(), "forecastNote")
+        forecast_note.setWordWrap(True)
+        layout.addWidget(forecast_note)
         note = self._named(QLabel(
             "Charts and totals cover one currency at a time and exclude transfers "
             "and pension activity. "
@@ -361,12 +365,20 @@ class FinanceMainWindow(QMainWindow):
 
         def refresh():
             colors = chart_colors()
+            forecast_date = date.today() + timedelta(days=14)
+            table.setHorizontalHeaderItem(
+                3, QTableWidgetItem(f"Forecast ({forecast_date:%d %b %Y})")
+            )
             with self.session_factory() as session:
                 accounts = [
                     a for a in AccountService(session).list_accounts()
                     if a.account_type != AccountType.PENSION.value
                 ]
-                due_schedules = ScheduledTransactionService(session).due_schedules()
+                schedules = ScheduledTransactionService(session)
+                due_schedules = schedules.due_schedules()
+                forecasts, forecast_warnings = schedules.forecast_balances(
+                    forecast_date
+                )
                 currencies = sorted({a.currency for a in accounts})
                 chosen = currency.currentText()
                 currency.blockSignals(True)
@@ -382,8 +394,13 @@ class FinanceMainWindow(QMainWindow):
                 table.setRowCount(len(active))
                 for row, item in enumerate(active):
                     balance = from_minor_units(AccountService(session).balance(item.id))
+                    forecast = from_minor_units(forecasts[item.id])
                     for col, value in enumerate(
-                        [item.name, item.account_type, f"{item.currency} {balance:,.2f}"]
+                        [
+                            item.name, item.account_type,
+                            f"{item.currency} {balance:,.2f}",
+                            f"{item.currency} {forecast:,.2f}",
+                        ]
                     ):
                         table.setItem(row, col, QTableWidgetItem(str(value)))
 
@@ -393,6 +410,16 @@ class FinanceMainWindow(QMainWindow):
                 monthly = service.monthly_totals(start, end, cur, by=by)
                 categories = service.category_breakdown(start, end)
 
+            forecast_note.setText(
+                "Two-week forecast includes overdue and upcoming active scheduled "
+                "transactions and transfers through the date shown. "
+                "No transactions are posted. Paused reminders and inactive accounts "
+                "are excluded."
+                + (
+                    "\nForecast warning: " + " ".join(forecast_warnings)
+                    if forecast_warnings else ""
+                )
+            )
             due_count = len(due_schedules)
             if due_count == 1:
                 scheduled_reminder.setText(

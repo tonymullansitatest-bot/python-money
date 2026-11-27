@@ -342,6 +342,89 @@ def test_scheduled_transfer_failed_commit_rolls_back_both_legs_and_due_date(
     assert accounts.balance(source.id) == accounts.balance(destination.id) == 0
 
 
+def test_forecast_includes_overdue_months_boundary_and_preserves_ledger(session):
+    accounts = AccountService(session)
+    current = accounts.create_account("Current", opening_balance="1000")
+    savings = accounts.create_account("Savings", opening_balance="200")
+    schedules = ScheduledTransactionService(session)
+    bill = schedules.create_schedule(
+        "Bill", current.id, "10", "Expense", date(2025, 12, 31)
+    )
+    schedules.create_schedule(
+        "Salary", current.id, "100", "Income", date(2026, 3, 14)
+    )
+    schedules.create_schedule(
+        "Savings", current.id, "25", "Transfer", date(2026, 3, 14),
+        destination_id=savings.id,
+    )
+    schedules.create_schedule(
+        "Too late", current.id, "999", "Expense", date(2026, 3, 15)
+    )
+    paused = schedules.create_schedule(
+        "Paused", current.id, "999", "Expense", date(2026, 3, 1)
+    )
+    schedules.set_active(paused.id, False)
+
+    balances, warnings = schedules.forecast_balances(date(2026, 3, 14))
+    # December, January and February bills, plus salary and both transfer legs.
+    assert balances == {current.id: 104500, savings.id: 22500}
+    assert warnings == []
+    assert schedules.forecast_balances(date(2026, 3, 14)) == (balances, [])
+    session.expire_all()
+    assert bill.next_due_date == date(2025, 12, 31)
+    assert TransactionService(session).list_transactions() == []
+    assert accounts.balance(current.id) == 100000
+
+
+def test_forecast_does_not_double_count_posted_occurrences_and_handles_pension(session):
+    accounts = AccountService(session)
+    current = accounts.create_account("Current", opening_balance="100")
+    pension = accounts.create_account("Pension", AccountType.PENSION.value)
+    schedules = ScheduledTransactionService(session)
+    schedule = schedules.create_schedule(
+        "Pension transfer", current.id, "20", "Transfer", date(2026, 1, 31),
+        destination_id=pension.id,
+    )
+    schedules.post_due(schedule.id, date(2026, 1, 31))
+    assert schedules.forecast_balances(date(2026, 2, 28)) == (
+        {current.id: 6000, pension.id: 4000}, []
+    )
+    assert schedules.forecast_balances(date(2026, 3, 30)) == (
+        {current.id: 6000, pension.id: 4000}, []
+    )
+    assert schedules.forecast_balances(date(2026, 3, 31)) == (
+        {current.id: 4000, pension.id: 6000}, []
+    )
+    assert schedule.next_due_date == date(2026, 2, 28)
+    assert len(TransactionService(session).list_transactions()) == 2
+
+
+def test_forecast_warns_and_excludes_cross_currency_and_inactive_accounts(session):
+    accounts = AccountService(session)
+    current = accounts.create_account("Current", opening_balance="100")
+    dollar = accounts.create_account("Dollar", currency="USD")
+    archived = accounts.create_account("Archived")
+    schedules = ScheduledTransactionService(session)
+    schedules.create_schedule(
+        "Foreign transfer", current.id, "20", "Transfer", date(2026, 1, 1),
+        destination_id=dollar.id,
+    )
+    schedules.create_schedule(
+        "Archived transfer", current.id, "30", "Transfer", date(2026, 1, 1),
+        destination_id=archived.id,
+    )
+    schedules.create_schedule(
+        "Archived bill", archived.id, "10", "Expense", date(2026, 1, 1)
+    )
+    accounts.set_active(archived.id, False)
+    balances, warnings = schedules.forecast_balances(date(2026, 1, 14))
+    assert balances == {current.id: 10000, dollar.id: 0}
+    assert len(warnings) == 3
+    assert any("exchange rate required" in warning for warning in warnings)
+    assert any("destination account inactive" in warning for warning in warnings)
+    assert any("source account inactive" in warning for warning in warnings)
+
+
 def test_reports_group_by_currency_category_and_account(session):
     accounts = AccountService(session)
     eur = accounts.create_account("Euro", currency="EUR")
